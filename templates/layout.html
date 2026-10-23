@@ -1,0 +1,50 @@
+{{define "header"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="/">{{.Title}}</a>
+  {{if .User}}
+  <form method="post" action="/logout" class="inline">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <span class="who">{{.User.Name}}</span>
+    <button class="link">Log out</button>
+  </form>
+  {{end}}
+</header>
+<main>
+{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+{{if .Notice}}<p class="notice" role="status">{{.Notice}}</p>{{end}}
+{{end}}
+
+{{define "footer"}}
+</main>
+</body>
+</html>
+{{end}}
+
+{{define "grants"}}
+{{if .Buckets}}
+<table class="grants">
+  <thead><tr><th>Bucket</th><th>No access</th><th>Read only</th><th>Read &amp; write</th></tr></thead>
+  <tbody>
+  {{$g := .Grants}}
+  {{range .Buckets}}{{$p := index $g .}}
+  <tr>
+    <td><code>{{.}}</code></td>
+    <td><input type="radio" name="perm_{{.}}" value="" aria-label="{{.}}: no access" {{if not $p}}checked{{end}}></td>
+    <td><input type="radio" name="perm_{{.}}" value="read" aria-label="{{.}}: read only" {{if eq $p "read"}}checked{{end}}></td>
+    <td><input type="radio" name="perm_{{.}}" value="readwrite" aria-label="{{.}}: read and write" {{if eq $p "readwrite"}}checked{{end}}></td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">You don't have any buckets yet. You can create the key now and give it access later.</p>
+{{end}}
+{{end}}

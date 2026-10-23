@@ -1,0 +1,28 @@
+{{template "header" .}}
+<section class="card">
+  <h1>Key created: {{.KeyLabel}}</h1>
+  <p class="warning">Copy the secret now. It isn't shown again; if you lose it, revoke the key and make a new one.</p>
+  <dl>
+    <dt>Access key ID</dt><dd><code class="copy">{{.KeyAccess}}</code></dd>
+    <dt>Secret access key</dt><dd><code class="copy">{{.KeySecret}}</code></dd>
+    <dt>Endpoint</dt><dd><code>{{.S3URL}}</code></dd>
+    <dt>Region</dt><dd><code>{{.Region}}</code></dd>
+    <dt>Buckets</dt><dd>{{$g := .Grants}}{{range .Buckets}}<div><code>{{.}}</code> <span class="muted">{{permLabel (index $g .)}}</span></div>{{else}}<span class="muted">none yet</span>{{end}}</dd>
+  </dl>
+  <h2>rclone</h2>
+  <pre class="copy">[s3]
+type = s3
+provider = Other
+access_key_id = {{.KeyAccess}}
+secret_access_key = {{.KeySecret}}
+endpoint = {{.S3URL}}
+region = {{.Region}}
+force_path_style = true
+no_check_bucket = true</pre>
+  <p class="muted">Keys can't create buckets, so tools that try to (rclone does by default) need telling not to: that's the <code>no_check_bucket</code> line.</p>
+  <h2>AWS CLI</h2>
+  <pre class="copy">AWS_ACCESS_KEY_ID={{.KeyAccess}} AWS_SECRET_ACCESS_KEY={{.KeySecret}} \
+  aws --endpoint-url {{.S3URL}} --region {{.Region}} s3 ls s3://BUCKET/</pre>
+  <p><a class="button" href="/">Done</a></p>
+</section>
+{{template "footer" .}}

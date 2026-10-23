@@ -1,0 +1,14 @@
+{{template "header" .}}
+<section class="card">
+  <h1>Edit access key</h1>
+  <p>Access key ID <code>{{.KeyAccess}}</code></p>
+  <form method="post" action="/keys/edit">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="access" value="{{.KeyAccess}}">
+    <label>Name <input name="label" value="{{.KeyLabel}}" maxlength="64" required></label>
+    <h2>Buckets</h2>
+    {{template "grants" .}}
+    <p class="row"><button>Save</button> <a href="/">Cancel</a></p>
+  </form>
+</section>
+{{template "footer" .}}
