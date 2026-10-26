@@ -64,9 +64,9 @@ func run() error {
 		ServerName:   os.Getenv("LDAP_SERVER_NAME"),
 		CAFile:       os.Getenv("LDAP_CA_FILE"),
 		BaseDN:       need("LDAP_BASE_DN"),
-		PasswdFile:   env("PASSWD_FILE", "/etc/passwd"),
-		GroupFile:    env("GROUP_FILE", "/etc/group"),
-		AllowedGroup: os.Getenv("ALLOWED_GROUP"),
+		BindDN:       need("LDAP_BIND_DN"),
+		BindPassword: secret("LDAP_BIND_PASSWORD"),
+		AllowedGroup: os.Getenv("ALLOWED_GROUP_DN"),
 	}
 	sessionKey := secret("SESSION_KEY")
 	statePath := need("STATE_FILE")

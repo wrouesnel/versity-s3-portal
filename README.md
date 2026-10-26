@@ -11,11 +11,16 @@ they pick.
 
 ## How it works
 
-- **Login:** an LDAP simple bind as `cn=<user>,<LDAP_BASE_DN>`, which is the
-  form glauth's PAM backend accepts. The user's uid and gid then come from the
-  passwd file the LDAP server is backed by, because glauth doesn't let
-  ordinary users search. Root (uid 0) is always refused. `ALLOWED_GROUP`
-  optionally limits who can log in.
+- **Login:** search-then-bind.
+  - A search account looks the user up with
+    `(&(objectClass=posixAccount)(uid=<user>))`, plus a `memberOf` term when
+    `ALLOWED_GROUP_DN` is set.
+  - The portal then binds as the returned DN to check the password.
+  - The user's uid and gid come from the entry's `uidNumber` and `gidNumber`.
+  - Root (uid or gid 0) is always refused.
+  - With glauth's PAM backend, the search account must be in its
+    `groupWithSearchCapability` group, and group DNs look like
+    `ou=<group>,ou=groups,<base DN>`.
 - **Buckets:** each user has an owner account in the gateway, `owner.<user>`,
   that owns their buckets. Its secret is random and thrown away, so nobody can
   sign as it. The portal creates buckets through the admin API with that
@@ -58,9 +63,9 @@ they pick.
 | `LDAP_URL` | e.g. `ldaps://ldap.example.com:636` |
 | `LDAP_SERVER_NAME` | TLS server name, when the URL is an IP |
 | `LDAP_CA_FILE` | CA bundle for the LDAP server (default: system roots) |
-| `LDAP_BASE_DN` | e.g. `dc=example,dc=com` |
-| `PASSWD_FILE`, `GROUP_FILE` | The LDAP server's passwd and group files (default `/etc/passwd`, `/etc/group`) |
-| `ALLOWED_GROUP` | Only members of this Unix group may log in (default: anyone) |
+| `LDAP_BASE_DN` | Where users are searched for, e.g. `dc=example,dc=com` |
+| `LDAP_BIND_DN`, `LDAP_BIND_PASSWORD` | The search account (or `LDAP_BIND_PASSWORD_FILE`) |
+| `ALLOWED_GROUP_DN` | Only users with this group in `memberOf` may log in (default: anyone in the directory) |
 | `SESSION_KEY` | At least 32 random characters for signing session cookies (or `SESSION_KEY_FILE`) |
 | `STATE_FILE` | Where key records are kept |
 | `PUBLIC_S3_URL` | The S3 endpoint as users should configure it |
@@ -79,7 +84,10 @@ the base images.
 go test ./...
 ```
 
-The integration test drives a real gateway when `VGW_TEST_S3`,
+`TestLDAPAuthIntegration` drives a real LDAP server when the `LDAP_TEST_*`
+variables described in `ldap_integration_test.go` are set.
+
+The gateway integration test drives a real gateway when `VGW_TEST_S3`,
 `VGW_TEST_ADMIN`, `VGW_TEST_ACCESS` and `VGW_TEST_SECRET` are set:
 
 ```sh

@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/go-ldap/ldap/v3"
 )
 
 func TestBucketPolicy(t *testing.T) {
@@ -79,36 +80,36 @@ func TestSessions(t *testing.T) {
 	}
 }
 
-func TestPasswdLookup(t *testing.T) {
-	dir := t.TempDir()
-	passwd := filepath.Join(dir, "passwd")
-	group := filepath.Join(dir, "group")
-	os.WriteFile(passwd, []byte("root:x:0:0:root:/root:/bin/bash\nalice:x:1001:1001::/home/alice:/bin/bash\nbob:x:1002:100::/home/bob:/bin/sh\n"), 0o644)
-	os.WriteFile(group, []byte("s3:x:2000:bob\nalice:x:1001:\n"), 0o644)
+func TestLDAPUser(t *testing.T) {
+	a := &LDAPAuth{BaseDN: "dc=example,dc=com", AllowedGroup: "ou=s3-users,ou=groups,dc=example,dc=com"}
+	want := "(&(objectClass=posixAccount)(uid=alice)(memberOf=ou=s3-users,ou=groups,dc=example,dc=com))"
+	if got := a.userFilter("alice"); got != want {
+		t.Fatalf("filter %s, want %s", got, want)
+	}
 
-	u, err := lookupPasswd(passwd, "alice")
-	if err != nil || u.UID != 1001 || u.GID != 1001 {
+	entry := func(uid, uidNumber, gidNumber string) *ldap.Entry {
+		return ldap.NewEntry("cn="+uid+",ou="+uid+",ou=users,dc=example,dc=com", map[string][]string{
+			"uid": {uid}, "uidNumber": {uidNumber}, "gidNumber": {gidNumber},
+		})
+	}
+	u, err := userFromEntry("alice", entry("alice", "1001", "1001"))
+	if err != nil || u.UID != 1001 || u.GID != 1001 || u.Name != "alice" {
 		t.Fatalf("alice: %+v %v", u, err)
 	}
-	if _, err := lookupPasswd(passwd, "root"); err != ErrBadCredentials {
+	if _, err := userFromEntry("root", entry("root", "0", "0")); err != ErrBadCredentials {
 		t.Fatalf("root should be refused, got %v", err)
 	}
-	if _, err := lookupPasswd(passwd, "nobody"); err != ErrBadCredentials {
-		t.Fatalf("unknown user should be refused, got %v", err)
+	if _, err := userFromEntry("bob", entry("bob", "1002", "0")); err != ErrBadCredentials {
+		t.Fatalf("gid 0 should be refused, got %v", err)
 	}
-	bob, _ := lookupPasswd(passwd, "bob")
-	if ok, _ := inGroup(group, "s3", bob); !ok {
-		t.Fatal("bob is a member of s3")
+	if _, err := userFromEntry("alice", entry("bob", "1002", "1002")); err == nil {
+		t.Fatal("an entry for someone else should be an error")
 	}
-	if ok, _ := inGroup(group, "s3", u); ok {
-		t.Fatal("alice isn't a member of s3")
-	}
-	if ok, _ := inGroup(group, "alice", u); !ok {
-		t.Fatal("primary group should count")
+	if _, err := userFromEntry("alice", entry("alice", "", "1001")); err == nil {
+		t.Fatal("an entry without uidNumber should be an error")
 	}
 
-	a := &LDAPAuth{PasswdFile: passwd, GroupFile: group, AllowedGroup: "s3"}
-	for _, name := range []string{"alice", "root", "Bad Name", "a,cn=admin", ""} {
+	for _, name := range []string{"Bad Name", "a,cn=admin", "*", ""} {
 		if _, err := a.Authenticate(name, "pw"); err != ErrBadCredentials {
 			t.Errorf("%q: want bad credentials before any LDAP call, got %v", name, err)
 		}
