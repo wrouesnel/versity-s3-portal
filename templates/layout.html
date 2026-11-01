@@ -5,11 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
 </head>
 <body>
 <header>
   <a class="brand" href="/">{{.Title}}</a>
   {{if .User}}
+  <nav class="links">
+    <a href="/">Buckets &amp; keys</a>
+    {{if .User.Admin}}<a href="/admin">Admin</a>{{end}}
+  </nav>
   <form method="post" action="/logout" class="inline">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <span class="who">{{.User.Name}}</span>

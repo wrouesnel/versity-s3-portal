@@ -23,6 +23,8 @@ type User struct {
 	Name string
 	UID  int
 	GID  int
+	// Admin may see and revoke everyone's keys.
+	Admin bool `json:",omitempty"`
 }
 
 // Authenticator checks a username and password.
@@ -42,6 +44,8 @@ type LDAPAuth struct {
 	BindPassword string
 	// AllowedGroup, when set, is the group DN users must have in memberOf.
 	AllowedGroup string
+	// AdminGroup, when set, is the group DN that makes users admins.
+	AdminGroup string
 }
 
 // userFilter matches the user's account entry. objectClass is needed because
@@ -100,6 +104,7 @@ func (a *LDAPAuth) Authenticate(username, password string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	user.Admin = a.AdminGroup != "" && hasGroup(entry, a.AdminGroup)
 
 	if err := conn.Bind(entry.DN, password); err != nil {
 		if ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) {
@@ -108,6 +113,15 @@ func (a *LDAPAuth) Authenticate(username, password string) (User, error) {
 		return User{}, fmt.Errorf("LDAP bind: %w", err)
 	}
 	return user, nil
+}
+
+func hasGroup(entry *ldap.Entry, group string) bool {
+	for _, g := range entry.GetAttributeValues("memberOf") {
+		if strings.EqualFold(g, group) {
+			return true
+		}
+	}
+	return false
 }
 
 func userFromEntry(username string, entry *ldap.Entry) (User, error) {

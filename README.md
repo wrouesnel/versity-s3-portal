@@ -1,8 +1,9 @@
 # s3-key-portal
 
-A small web app that lets people log in with their LDAP password and issue
-[versitygw](https://github.com/versity/versitygw) S3 access keys limited to
-buckets they own.
+A small web app that lets people log in with their LDAP password, make
+buckets on a [versitygw](https://github.com/versity/versitygw) gateway,
+browse, upload and download their files, and issue S3 access keys limited to
+buckets they own. Admins can see and revoke everyone's keys.
 
 S3 signs every request with a secret the server must already hold, so S3
 clients can't log in with an LDAP password. Instead people log in here, and
@@ -36,8 +37,20 @@ they pick.
   - A key gets read-only or read & write access to each bucket. Bucket
     policy, ACL and bucket configuration actions are never granted, so a key
     can't widen its own access.
+- **File browser:** each user also has a web account in the gateway,
+  `web.<user>`, with their uid and gid. The portal creates it the first time
+  it's needed and gives it read & write in each of the user's bucket
+  policies, then browses, uploads, downloads and deletes as that account, so
+  uploads are owned by the user on disk and the gateway confines the account
+  to their buckets as well. Uploads and downloads stream through the portal,
+  so files of any size work; downloads are always served as attachments.
+- **Admins:** members of `ADMIN_GROUP_DN` get an admin page listing every key,
+  where they can revoke any key, all of one person's keys, or every key at
+  once (typing "revoke all" to confirm). Revoking keys leaves buckets, files
+  and the file browser alone. Membership is read at login.
 - **State:** `STATE_FILE` is a JSON file recording each key's owner, name and
-  bucket grants. The secrets live only in the gateway.
+  bucket grants, and each web account's credentials. Key secrets live only in
+  the gateway.
 - **Reconcile at startup:** the portal drops keys the gateway no longer has
   and grants on buckets the owner no longer owns. Then it rewrites the policy
   of every bucket owned by an `owner.*` account.
@@ -66,6 +79,7 @@ they pick.
 | `LDAP_BASE_DN` | Where users are searched for, e.g. `dc=example,dc=com` |
 | `LDAP_BIND_DN`, `LDAP_BIND_PASSWORD` | The search account (or `LDAP_BIND_PASSWORD_FILE`) |
 | `ALLOWED_GROUP_DN` | Only users with this group in `memberOf` may log in (default: anyone in the directory) |
+| `ADMIN_GROUP_DN` | Users with this group in `memberOf` are admins (default: nobody) |
 | `SESSION_KEY` | At least 32 random characters for signing session cookies (or `SESSION_KEY_FILE`) |
 | `STATE_FILE` | Where key records are kept |
 | `PUBLIC_S3_URL` | The S3 endpoint as users should configure it |
@@ -73,7 +87,12 @@ they pick.
 | `LISTEN` | Listen address (default `:8080`) |
 | `INSECURE_COOKIES` | Set to drop the cookie `Secure` flag, for testing over plain HTTP |
 
-Run it behind a TLS-terminating proxy.
+Run it behind a TLS-terminating proxy. To serve the portal and the S3 API on
+one host name, have the proxy send requests that carry an S3 signature (an
+`Authorization` header starting `AWS`, or `X-Amz-Signature`/`Signature` in the
+query string) to the gateway, and the rest to the portal: browsers never sign
+requests, and S3 clients always do. For uploads of any size, don't limit or
+buffer request bodies on the way to the portal either.
 
 ## Building and testing
 
@@ -87,8 +106,10 @@ go test ./...
 `TestLDAPAuthIntegration` drives a real LDAP server when the `LDAP_TEST_*`
 variables described in `ldap_integration_test.go` are set.
 
-The gateway integration test drives a real gateway when `VGW_TEST_S3`,
-`VGW_TEST_ADMIN`, `VGW_TEST_ACCESS` and `VGW_TEST_SECRET` are set:
+The gateway integration tests drive a real gateway when `VGW_TEST_S3`,
+`VGW_TEST_ADMIN`, `VGW_TEST_ACCESS` and `VGW_TEST_SECRET` are set. With
+`VGW_TEST_DATA` naming the gateway's posix root as the tests see it, they also
+check that uploads are owned by the uploader:
 
 ```sh
 podman run -d --name vgw -p 7070:7070 -p 7071:7071 \

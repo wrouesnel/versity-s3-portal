@@ -29,8 +29,18 @@ type Key struct {
 	Buckets map[string]Perm `json:"buckets"`
 }
 
+// WebAccount is the gateway account the portal acts as in someone's
+// buckets for the file browser. It carries their uid and gid, so files they
+// upload are theirs on disk. Its secret never leaves the portal.
+type WebAccount struct {
+	Access string `json:"access"`
+	Secret string `json:"secret"`
+}
+
 type state struct {
 	Keys map[string]*Key `json:"keys"`
+	// Web is each person's web account, by username.
+	Web map[string]*WebAccount `json:"web,omitempty"`
 }
 
 // Store is a JSON file of issued keys. Callers serialise access.
@@ -40,7 +50,7 @@ type Store struct {
 }
 
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path, state: state{Keys: map[string]*Key{}}}
+	s := &Store{path: path, state: state{Keys: map[string]*Key{}, Web: map[string]*WebAccount{}}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -53,6 +63,9 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if s.state.Keys == nil {
 		s.state.Keys = map[string]*Key{}
+	}
+	if s.state.Web == nil {
+		s.state.Web = map[string]*WebAccount{}
 	}
 	return s, nil
 }
@@ -94,6 +107,43 @@ func (s *Store) Put(access string, k *Key) error {
 func (s *Store) Delete(access string) error {
 	delete(s.state.Keys, access)
 	return s.save()
+}
+
+func (s *Store) Web(user string) (*WebAccount, bool) {
+	w, ok := s.state.Web[user]
+	return w, ok
+}
+
+func (s *Store) PutWeb(user string, w *WebAccount) error {
+	s.state.Web[user] = w
+	return s.save()
+}
+
+func (s *Store) DeleteWeb(user string) error {
+	delete(s.state.Web, user)
+	return s.save()
+}
+
+// WebUsers returns everyone with a web account.
+func (s *Store) WebUsers() []string {
+	out := keys(s.state.Web)
+	sort.Strings(out)
+	return out
+}
+
+// Entries returns every key, by owner and then oldest first.
+func (s *Store) Entries() []KeyEntry {
+	out := make([]KeyEntry, 0, len(s.state.Keys))
+	for access, k := range s.state.Keys {
+		out = append(out, KeyEntry{access, k})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Owner != out[j].Owner {
+			return out[i].Owner < out[j].Owner
+		}
+		return out[i].Created.Before(out[j].Created)
+	})
+	return out
 }
 
 // AllKeys returns every access key ID.

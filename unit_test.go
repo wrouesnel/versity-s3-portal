@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,5 +167,67 @@ func TestCSRFAndAuthRequired(t *testing.T) {
 	}
 	if rec.Header().Get("Content-Security-Policy") == "" {
 		t.Fatal("missing CSP header")
+	}
+}
+
+func TestAdminAndUploadGuards(t *testing.T) {
+	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
+	h := NewServer(nil, nil, sessions, "t", "https://s3", "us-east-1").Handler()
+	login := httptest.NewRecorder()
+	sessions.Start(login, User{Name: "alice", UID: 1001, GID: 1001})
+	cookie := login.Result().Cookies()[0]
+
+	req := httptest.NewRequest("GET", "/admin", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin GET /admin: want 403, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest("PUT", "/upload?bucket=b&key=k", strings.NewReader("x"))
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("upload without CSRF header: want 403, got %d", rec.Code)
+	}
+}
+
+func TestAdminGroup(t *testing.T) {
+	entry := ldap.NewEntry("cn=will,ou=users,dc=example,dc=com", map[string][]string{
+		"memberOf": {"ou=s3-users,ou=groups,dc=example,dc=com", "OU=S3-Admin,ou=groups,dc=example,dc=com"},
+	})
+	if !hasGroup(entry, "ou=s3-admin,ou=groups,dc=example,dc=com") {
+		t.Error("admin group not found")
+	}
+	if hasGroup(entry, "ou=other,ou=groups,dc=example,dc=com") {
+		t.Error("found a group the entry isn't in")
+	}
+}
+
+func TestPaths(t *testing.T) {
+	if got := s3Escape("dir/a b+c=d&é~.txt"); got != "dir/a%20b%2Bc%3Dd%26%C3%A9~.txt" {
+		t.Errorf("s3Escape: %s", got)
+	}
+	if got := parentPrefix("a/b/c.txt"); got != "a/b/" {
+		t.Errorf("parentPrefix: %s", got)
+	}
+	if got := parentPrefix("c.txt"); got != "" {
+		t.Errorf("parentPrefix of a top-level key: %q", got)
+	}
+	if c := crumbs("a/b/"); len(c) != 2 || c[1].Name != "b" || c[1].Prefix != "a/b/" {
+		t.Errorf("crumbs: %+v", c)
+	}
+	if got := humanSize(1536); got != "1.5 KiB" {
+		t.Errorf("humanSize: %s", got)
+	}
+	for _, bad := range []string{"", "/abs", "a\x00b", "a\nb"} {
+		if checkKey(bad) == nil {
+			t.Errorf("checkKey accepted %q", bad)
+		}
+	}
+	if checkPrefix("dir") == nil {
+		t.Error("checkPrefix accepted a prefix without a trailing slash")
 	}
 }

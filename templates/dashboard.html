@@ -5,8 +5,8 @@
   <ul class="rows">
     {{range .Buckets}}
     <li>
-      <code>{{.}}</code>
-      <form method="post" action="/buckets/delete" class="inline">
+      <a href="/browse?bucket={{.}}"><code>{{.}}</code></a>
+      <form method="post" action="/buckets/delete" class="inline" data-confirm="Delete the bucket {{.}}? It has to be empty.">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <input type="hidden" name="name" value="{{.}}">
         <button class="danger small">Delete</button>
@@ -14,7 +14,7 @@
     </li>
     {{end}}
   </ul>
-  <p class="muted">A bucket can only be deleted once it's empty.</p>
+  <p class="muted">Open a bucket to browse, upload and delete its files. A bucket can only be deleted once it's empty.</p>
   {{else}}
   <p class="muted">No buckets yet.</p>
   {{end}}
@@ -42,7 +42,7 @@
       </td>
       <td class="actions">
         <a class="button small" href="/keys/edit?access={{.Access}}">Edit</a>
-        <form method="post" action="/keys/delete" class="inline">
+        <form method="post" action="/keys/delete" class="inline" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <input type="hidden" name="access" value="{{.Access}}">
           <button class="danger small">Revoke</button>

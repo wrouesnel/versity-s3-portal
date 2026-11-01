@@ -67,6 +67,7 @@ func run() error {
 		BindDN:       need("LDAP_BIND_DN"),
 		BindPassword: secret("LDAP_BIND_PASSWORD"),
 		AllowedGroup: os.Getenv("ALLOWED_GROUP_DN"),
+		AdminGroup:   os.Getenv("ADMIN_GROUP_DN"),
 	}
 	sessionKey := secret("SESSION_KEY")
 	statePath := need("STATE_FILE")

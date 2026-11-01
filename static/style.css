@@ -54,3 +54,17 @@ dd { margin: 0; }
   td.actions { text-align: left; }
   dl { grid-template-columns: 1fr; }
 }
+header nav.links { display: flex; gap: 16px; margin-right: auto; margin-left: 24px; }
+header nav.links a { color: var(--accent); text-decoration: none; }
+nav.crumbs { margin-bottom: 12px; overflow-wrap: anywhere; }
+nav.crumbs a { color: var(--accent); }
+a.folder::before { content: "📁 "; }
+table.files td { vertical-align: middle; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+ul.uploads { list-style: none; padding: 0; margin: 8px 0 0; }
+ul.uploads li { display: flex; gap: 12px; align-items: center; padding: 4px 0; }
+ul.uploads progress { flex: 1; }
+.error-text { color: var(--danger); }
+.danger-zone { border-color: var(--danger); }
+input[type=file] { flex: 1; min-width: 180px; }
+button:disabled { opacity: 0.6; cursor: default; }
