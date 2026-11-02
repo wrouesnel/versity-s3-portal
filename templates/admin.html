@@ -71,6 +71,36 @@
   {{end}}
 </section>
 
+{{if .Trash}}
+<section class="card">
+  <h1>Deleted buckets</h1>
+  <p class="muted">Deleted buckets keep their data and snapshots here, out of reach, until purged. Purging also destroys the host's own snapshots of them.</p>
+  <table class="trash">
+    <thead><tr><th>Bucket</th><th>Deleted</th><th class="num">Holds</th><th>Snapshots</th><th></th></tr></thead>
+    <tbody>
+    {{range .Trash}}
+    <tr>
+      <td><code>{{.Bucket}}</code></td>
+      <td>{{.Trashed.Local.Format "2 Jan 2006 15:04"}}</td>
+      <td class="num">{{humanSize .Used}}</td>
+      <td class="small">{{.PortalSnapshots}} portal, {{.OtherSnapshots}} host</td>
+      <td class="actions">
+        <form method="post" action="/admin/trash/restore" data-confirm="Restore {{.Bucket}}? Its groups and keys need access given again.">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="entry" value="{{.Entry}}">
+          <button class="ghost small">Restore</button>
+        </form>
+        <form method="post" action="/admin/trash/purge" data-confirm="Destroy {{.Bucket}} for good, with all {{.PortalSnapshots}} portal and {{.OtherSnapshots}} host snapshots? This can't be undone.">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="entry" value="{{.Entry}}">
+          <button class="ghost danger small">Purge</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
 <section class="card">
   <h1>Everyone's access keys</h1>
   {{if .AllKeys}}

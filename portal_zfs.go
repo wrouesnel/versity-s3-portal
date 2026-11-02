@@ -404,3 +404,56 @@ func (p *Portal) snapshotRound(ctx context.Context, now time.Time) {
 		}
 	}
 }
+
+// Trash lists deleted buckets, for admins.
+func (p *Portal) Trash(ctx context.Context, u User) ([]ZFSTrashEntry, error) {
+	if p.zfs == nil || !u.Admin {
+		return nil, nil
+	}
+	return p.zfs.Trash(ctx)
+}
+
+// RestoreTrash brings a deleted bucket back, for admins. Its data,
+// snapshots and owner come back; group grants and key grants on it were
+// dropped when it was deleted and have to be given again.
+func (p *Portal) RestoreTrash(ctx context.Context, u User, entry string) error {
+	if p.zfs == nil {
+		return errNoZFS
+	}
+	if !u.Admin {
+		return userErr("Only admins can restore deleted buckets.")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	err := p.zfs.RestoreTrash(ctx, entry)
+	if errors.Is(err, ErrZFSExists) {
+		return userErr("There's a bucket with that name again. Delete or rename it first.")
+	}
+	if err != nil {
+		return zfsUserError(err)
+	}
+	p.forgetBuckets()
+	bucket := entry[:strings.LastIndex(entry, "-")]
+	delete(p.written, bucket)
+	if err := p.syncBuckets(ctx, []string{bucket}); err != nil {
+		return err
+	}
+	slog.Warn("restored deleted bucket", "admin", u.Name, "entry", entry, "bucket", bucket)
+	return nil
+}
+
+// PurgeTrash destroys a deleted bucket for good, snapshots and all, for
+// admins.
+func (p *Portal) PurgeTrash(ctx context.Context, u User, entry string) error {
+	if p.zfs == nil {
+		return errNoZFS
+	}
+	if !u.Admin {
+		return userErr("Only admins can purge deleted buckets.")
+	}
+	if err := p.zfs.PurgeTrash(ctx, entry); err != nil {
+		return zfsUserError(err)
+	}
+	slog.Warn("purged deleted bucket", "admin", u.Name, "entry", entry)
+	return nil
+}

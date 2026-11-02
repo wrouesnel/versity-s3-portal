@@ -29,11 +29,12 @@ func TestZFSAgainstGateway(t *testing.T) {
 	os.MkdirAll(filepath.Join(filepath.Dir(data), ".s3-zfs-staging"), 0o700)
 	fake, err := zfstest.New("storage/s3/buckets", data)
 	ok(t, "fake zfs", err)
+	fake.AddUnmounted("storage/s3/trash")
 	clock := time.Now().UTC()
 	fake.Now = func() time.Time { return clock }
 	helper := zfshelper.New(zfshelper.Config{
 		Parent: "storage/s3/buckets", Root: data, Run: fake.Run, Now: func() time.Time { return clock },
-		Staging: filepath.Join(filepath.Dir(data), ".s3-zfs-staging"), StateDir: t.TempDir(),
+		Staging: filepath.Join(filepath.Dir(data), ".s3-zfs-staging"), StateDir: t.TempDir(), Trash: "storage/s3/trash",
 		// The fake's datasets are directories on the same filesystem.
 		SkipMountCheck: true,
 	})
@@ -152,5 +153,45 @@ func TestZFSAgainstGateway(t *testing.T) {
 	}
 	if bs, _ := p.Buckets(ctx, alice); len(bs) != 0 {
 		t.Errorf("gateway still has %v", bs)
+	}
+
+	// It's in the trash, where only admins can see, restore or purge it.
+	if tr, _ := p.Trash(ctx, alice); tr != nil {
+		t.Error("non-admin sees the trash")
+	}
+	trash, err := p.Trash(ctx, admin)
+	ok(t, "trash", err)
+	var entry string
+	for _, e := range trash {
+		if e.Bucket == bucket {
+			entry = e.Entry
+		}
+	}
+	if entry == "" {
+		t.Fatalf("deleted bucket isn't in the trash: %+v", trash)
+	}
+	userError(t, "owner restores", p.RestoreTrash(ctx, alice, entry))
+	ok(t, "admin restores", p.RestoreTrash(ctx, admin, entry))
+	bs, err := p.Buckets(ctx, alice)
+	ok(t, "buckets after restore", err)
+	if len(bs) != 1 || bs[0].Name != bucket || bs[0].Owner != alice.Name {
+		t.Fatalf("after restore alice sees %+v", bs)
+	}
+	ok(t, "alice writes to the restored bucket", p.PutObject(ctx, alice, bucket, "back.txt", strings.NewReader("back"), 4, ""))
+	if st, _ := p.Storage(ctx, alice, bucket); st == nil || len(st.Snapshots) != 3 {
+		t.Errorf("snapshots after restore: %+v", st)
+	}
+
+	// Delete again, then purge.
+	ok(t, "empty it", p.DeleteObject(ctx, alice, bucket, "back.txt"))
+	ok(t, "delete again", p.DeleteBucket(ctx, alice, bucket))
+	trash, _ = p.Trash(ctx, admin)
+	for _, e := range trash {
+		if e.Bucket == bucket {
+			ok(t, "purge", p.PurgeTrash(ctx, admin, e.Entry))
+		}
+	}
+	if trash, _ = p.Trash(ctx, admin); len(trash) != 0 {
+		t.Errorf("trash after purge: %+v", trash)
 	}
 }

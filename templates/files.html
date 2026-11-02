@@ -152,7 +152,7 @@
 
     <section class="danger-zone">
       <h2>Delete bucket</h2>
-      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.{{if .ZFS}} Its snapshots are deleted with it.{{end}}</p>
+      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.{{if .ZFS}} It goes to the trash with its snapshots, where an admin can restore or purge it.{{end}}</p>
       <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.Open.Name}}? It has to be empty.">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
         <input type="hidden" name="name" value="{{.Open.Name}}">

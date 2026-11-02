@@ -146,6 +146,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/check", s.authed(s.admin(s.adminCheck)))
 	mux.HandleFunc("POST /admin/sync", s.authed(s.admin(s.adminSync)))
 	mux.HandleFunc("POST /admin/end-sessions", s.authed(s.admin(s.adminEndSessions)))
+	mux.HandleFunc("POST /admin/trash/restore", s.authed(s.admin(s.adminRestoreTrash)))
+	mux.HandleFunc("POST /admin/trash/purge", s.authed(s.admin(s.adminPurgeTrash)))
 	// API, for automation and scripts.
 	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
 	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
@@ -212,6 +214,7 @@ type page struct {
 	People     []PersonStatus
 	AllBuckets []BucketSummary
 	Directory  bool
+	Trash      []ZFSTrashEntry
 }
 
 // crumb is one step of the path above the folder being browsed.
@@ -437,7 +440,11 @@ func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request, sess *Sess
 		redirectFlash(w, r, "/buckets/settings?bucket="+url.QueryEscape(name), "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/files", "Deleted bucket "+name+".", "")
+	msg := "Deleted bucket " + name + "."
+	if s.Portal.zfs != nil {
+		msg += " An admin can still restore it from the trash."
+	}
+	redirectFlash(w, r, "/files", msg, "")
 }
 
 func (s *Server) bucketSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -852,7 +859,30 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 		p.Error = userMessage(r, sess, err)
 	}
 	p.AllBuckets = buckets
+	if trash, err := s.Portal.Trash(r.Context(), sess.User); err != nil {
+		p.Error = userMessage(r, sess, err)
+	} else {
+		p.Trash = trash
+	}
 	s.render(w, http.StatusOK, "admin.html", p)
+}
+
+func (s *Server) adminRestoreTrash(w http.ResponseWriter, r *http.Request, sess *Session) {
+	entry := r.PostFormValue("entry")
+	if err := s.Portal.RestoreTrash(r.Context(), sess.User, entry); err != nil {
+		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/admin", "Restored the bucket. Give its groups and keys access again.", "")
+}
+
+func (s *Server) adminPurgeTrash(w http.ResponseWriter, r *http.Request, sess *Session) {
+	entry := r.PostFormValue("entry")
+	if err := s.Portal.PurgeTrash(r.Context(), sess.User, entry); err != nil {
+		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/admin", "Purged "+entry+" for good.", "")
 }
 
 func (s *Server) adminRevoke(w http.ResponseWriter, r *http.Request, sess *Session) {

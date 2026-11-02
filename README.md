@@ -152,8 +152,13 @@ they pick.
   [docs/zfs-helper.md](docs/zfs-helper.md)).
   - A new bucket is made by the gateway as usual, then moved, still empty,
     into its own dataset with the gateway's metadata (owner, ACL, policy
-    xattrs) carried over. Deleting a bucket destroys its dataset, through
-    the helper, once it's empty.
+    xattrs) carried over.
+  - **Deleting** an empty bucket moves its dataset to a trash dataset
+    instead of destroying it. The bucket disappears from S3 at once, but
+    its snapshots survive, the host's own included. Admins see deleted
+    buckets on the admin page, and can restore one (its data, snapshots
+    and owner come back; group and key grants must be given again) or
+    purge it for good.
   - **Quotas:** admins set each bucket's size limit (ZFS `refquota`, so
     snapshots don't count against it). New buckets get `ZFS_DEFAULT_QUOTA`.
   - **Backups:** admins mark buckets for the host's backups. That sets the
