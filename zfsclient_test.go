@@ -25,7 +25,13 @@ func TestZFSHelperClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := time.Date(2026, 11, 3, 7, 0, 0, 0, time.UTC)
-	srv := zfshelper.New(zfshelper.Config{Parent: "storage/s3/buckets", Root: root, Run: fake.Run, Now: func() time.Time { return clock }})
+	srv := zfshelper.New(zfshelper.Config{
+		Parent: "storage/s3/buckets", Root: root, Run: fake.Run, Now: func() time.Time { return clock },
+		Staging: filepath.Join(dir, "staging"), StateDir: filepath.Join(dir, "state"), SkipMountCheck: true,
+	})
+	if err := srv.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
 	sock := filepath.Join(dir, "h.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -95,8 +101,8 @@ func TestZFSHelperClient(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(root, "photos", "a.txt")); string(b) != "hello" {
 		t.Fatalf("restored %q", b)
 	}
-	if n, err := z.RestoreAll(ctx, "photos", snap.Name); err != nil || n != 1 {
-		t.Fatalf("restore all %d %v", n, err)
+	if res, err := z.RestoreAll(ctx, "photos", snap.Name); err != nil || res.Objects != 1 || res.Skipped != 0 {
+		t.Fatalf("restore all %+v %v", res, err)
 	}
 	if _, err := z.RestorePrefix(ctx, "photos", snap.Name, "nope/"); !errors.Is(err, ErrZFSNotFound) {
 		t.Fatalf("restore missing prefix: %v", err)
@@ -105,6 +111,11 @@ func TestZFSHelperClient(t *testing.T) {
 	if err := z.Destroy(ctx, "photos"); !errors.Is(err, ErrZFSNotEmpty) {
 		t.Fatalf("destroy non-empty: %v", err)
 	}
+	fake.Snapshot("storage/s3/buckets/photos", "weekly_2026-11-01", clock)
+	if err := z.Destroy(ctx, "photos"); !errors.Is(err, ErrZFSHasHostSnapshots) {
+		t.Fatalf("destroy with host snapshots: %v", err)
+	}
+	fake.Run(ctx, "destroy", "storage/s3/buckets/photos@weekly_2026-11-01")
 	if err := z.DeleteSnapshot(ctx, "photos", snap.Name); err != nil {
 		t.Fatal(err)
 	}

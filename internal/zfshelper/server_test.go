@@ -23,24 +23,37 @@ const parent = "storage/s3/buckets"
 type env struct {
 	t     *testing.T
 	root  string
+	state string
 	fake  *zfstest.Fake
 	srv   *httptest.Server
+	s     *Server
 	clock time.Time
 	// xattrs says whether the test filesystem takes user xattrs.
 	xattrs bool
 }
 
+func (e *env) config() Config {
+	return Config{
+		Parent: parent, Root: e.root, Staging: filepath.Join(filepath.Dir(e.root), "staging"), StateDir: e.state,
+		Run: e.fake.Run, Now: func() time.Time { return e.clock },
+		// Every "dataset" here is a directory on the same filesystem.
+		SkipMountCheck: true,
+	}
+}
+
 func newEnv(t *testing.T) *env {
-	root := filepath.Join(t.TempDir(), "buckets")
+	dir := t.TempDir()
+	root := filepath.Join(dir, "buckets")
 	fake, err := zfstest.New(parent, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, root: root, fake: fake, clock: time.Date(2026, 11, 3, 6, 30, 0, 0, time.UTC)}
-	s := New(Config{Parent: parent, Root: root, Run: fake.Run, Now: func() time.Time { return e.clock }})
+	e := &env{t: t, root: root, state: filepath.Join(dir, "state"), fake: fake, clock: time.Date(2026, 11, 3, 6, 30, 0, 0, time.UTC)}
+	s := New(e.config())
 	if err := s.Check(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	e.s = s
 	e.srv = httptest.NewServer(s.Handler())
 	t.Cleanup(e.srv.Close)
 	probe := filepath.Join(root, ".probe")
@@ -160,22 +173,155 @@ func TestAdopt(t *testing.T) {
 	e.want(400, "POST", "/buckets/Bad_Name/adopt", nil)
 	e.want(400, "POST", "/buckets/..%2Fescape/adopt", nil)
 
-	// zfs create fails: the directory comes back as it was.
-	dir = e.mkBucket("broken")
+	// The dataset was set up in staging, then moved; nothing's left there.
+	if ents, _ := os.ReadDir(filepath.Join(filepath.Dir(e.root), "staging")); len(ents) != 0 {
+		t.Errorf("staging not cleaned up: %v", ents)
+	}
+	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
+		t.Errorf("state not cleaned up: %v", ents)
+	}
+	var sawStaging, sawMove bool
+	for _, c := range e.fake.Calls() {
+		j := strings.Join(c, " ")
+		sawStaging = sawStaging || strings.HasPrefix(j, "create -o mountpoint="+filepath.Join(filepath.Dir(e.root), "staging", "photos"))
+		sawMove = sawMove || j == "set mountpoint="+dir+" "+parent+"/photos"
+	}
+	if !sawStaging || !sawMove {
+		t.Errorf("not staged and moved: %v", e.fake.Calls())
+	}
+
+	// zfs create fails: the directory stays as it was.
+	broken := e.mkBucket("broken")
 	e.fake.FailNext = map[string]error{"create": errors.New("out of space")}
 	e.want(500, "POST", "/buckets/broken/adopt", nil)
-	st, err = os.Lstat(dir)
-	if err != nil || !st.IsDir() || st.Mode().Perm() != 0o750 {
-		t.Fatalf("directory not put back: %v %v", st, err)
+	checkPutBack := func(dir string) {
+		t.Helper()
+		st, err := os.Lstat(dir)
+		if err != nil || !st.IsDir() || st.Mode().Perm() != 0o750 {
+			t.Fatalf("directory not put back: %v %v", st, err)
+		}
+		if e.xattrs && getxattr(dir, "user.policy") != `{"Version":"2012-10-17"}` {
+			t.Error("xattrs not put back")
+		}
 	}
-	if e.xattrs && getxattr(dir, "user.policy") != `{"Version":"2012-10-17"}` {
-		t.Error("xattrs not put back")
+	checkPutBack(broken)
+
+	// Created but not mounted: the dataset is destroyed again.
+	e.fake.CreateButNoMount = true
+	e.want(500, "POST", "/buckets/broken/adopt", nil)
+	if e.fake.IsDataset(parent + "/broken") {
+		t.Error("unmounted dataset left behind")
+	}
+	checkPutBack(broken)
+
+	// Moving the mountpoint fails: the directory is put back, the dataset
+	// destroyed.
+	e.fake.FailNext = map[string]error{"set": errors.New("mount failed")}
+	e.want(500, "POST", "/buckets/broken/adopt", nil)
+	if e.fake.IsDataset(parent + "/broken") {
+		t.Error("dataset left behind")
+	}
+	checkPutBack(broken)
+	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
+		t.Errorf("state not cleaned up after failures: %v", ents)
 	}
 
 	// A symlink where the bucket should be is refused.
 	os.Symlink("/etc", filepath.Join(e.root, "linked"))
 	if got, _ := e.do("POST", "/buckets/linked/adopt", nil); got < 400 {
 		t.Fatalf("symlinked bucket adopted: %d", got)
+	}
+
+	// A dataset that exists but isn't mounted isn't treated as adopted,
+	// nor usable.
+	e.fake.Unmount(parent + "/photos")
+	e.want(409, "POST", "/buckets/photos/adopt", nil)
+	if out := e.want(404, "GET", "/buckets/photos", nil); code(out) != zfsapi.CodeNotDataset {
+		t.Errorf("unmounted dataset: %s", out)
+	}
+}
+
+// A crash after the bucket directory was removed, before the dataset took
+// its place: Recover puts the directory back from the saved metadata.
+func TestAdoptRecovery(t *testing.T) {
+	e := newEnv(t)
+	dir := e.mkBucket("photos")
+	fd, err := openRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := readMeta(fd)
+	syscall.Close(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.s.saveState("photos", m); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(filepath.Dir(e.root), "staging", "photos")
+	if _, err := e.fake.Run(t.Context(), "create", "-o", "mountpoint="+stage, parent+"/photos"); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(dir)
+
+	s := New(e.config())
+	if err := s.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if e.fake.IsDataset(parent + "/photos") {
+		t.Error("half-made dataset not destroyed")
+	}
+	st, err := os.Lstat(dir)
+	if err != nil || st.Mode().Perm() != 0o750 {
+		t.Fatalf("directory not put back: %v %v", st, err)
+	}
+	if e.xattrs && getxattr(dir, "user.acl") != `{"Owner":"owner.alice"}` {
+		t.Error("xattrs not put back")
+	}
+	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
+		t.Errorf("state left: %v", ents)
+	}
+
+	// A crash after the move: Recover just tidies up.
+	e.want(201, "POST", "/buckets/photos/adopt", nil)
+	if err := e.s.saveState("photos", m); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(e.config()).Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !e.fake.IsDataset(parent + "/photos") {
+		t.Error("finished adoption undone")
+	}
+	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
+		t.Errorf("state left: %v", ents)
+	}
+}
+
+func TestStagingMustBeOutsideRoot(t *testing.T) {
+	e := newEnv(t)
+	c := e.config()
+	c.Staging = filepath.Join(e.root, ".staging")
+	if err := New(c).Check(t.Context()); err == nil {
+		t.Fatal("staging inside the buckets tree accepted")
+	}
+}
+
+func TestSameFilesystem(t *testing.T) {
+	a, _ := openRoot(t.TempDir())
+	b, _ := openRoot(t.TempDir())
+	p, err := openRoot("/proc")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer syscall.Close(a)
+	defer syscall.Close(b)
+	defer syscall.Close(p)
+	if same, err := sameFilesystem(a, b); err != nil || !same {
+		t.Errorf("two temp dirs: %v %v", same, err)
+	}
+	if same, err := sameFilesystem(a, p); err != nil || same {
+		t.Errorf("temp dir and /proc: %v %v", same, err)
 	}
 }
 
@@ -194,7 +340,14 @@ func TestDestroy(t *testing.T) {
 	os.Remove(filepath.Join(e.root, "photos/folder"))
 	// The gateway's temp dir doesn't count.
 	os.MkdirAll(filepath.Join(e.root, "photos/.sgwtmp/multipart"), 0o700)
+	// The host's snapshots would go with it: refused.
 	e.fake.Snapshot(parent+"/photos", "weekly_2026-11-01", e.clock)
+	if out := e.want(409, "DELETE", "/buckets/photos", nil); code(out) != zfsapi.CodeHasHostSnapshots {
+		t.Fatalf("code %s", out)
+	}
+	e.fake.Run(t.Context(), "destroy", parent+"/photos@weekly_2026-11-01")
+	// Our own snapshots go with it.
+	e.want(201, "POST", "/buckets/photos/snapshots", zfsapi.NewSnapshot{})
 	e.want(204, "DELETE", "/buckets/photos", nil)
 	if e.fake.IsDataset(parent + "/photos") {
 		t.Fatal("dataset still there")
@@ -203,9 +356,33 @@ func TestDestroy(t *testing.T) {
 		t.Error("mountpoint left behind")
 	}
 	calls := e.fake.Calls()
-	last := calls[len(calls)-1]
-	if strings.Join(last, " ") != "destroy -r "+parent+"/photos" {
-		t.Errorf("last call %v", last)
+	var tail []string
+	for _, c := range calls[len(calls)-2:] {
+		tail = append(tail, strings.Join(c, " "))
+	}
+	if strings.Join(tail, "; ") != "set readonly=on "+parent+"/photos; destroy -r "+parent+"/photos" {
+		t.Errorf("last calls %v", tail)
+	}
+
+	// Something is written just before the dataset goes read-only: the
+	// second check catches it, and the dataset is made writable again.
+	e.mkBucket("racy")
+	e.want(201, "POST", "/buckets/racy/adopt", nil)
+	e.fake.Hook = func(args []string) {
+		if strings.Join(args, " ") == "set readonly=on "+parent+"/racy" {
+			os.WriteFile(filepath.Join(e.root, "racy", "late.txt"), []byte("x"), 0o640)
+		}
+	}
+	if out := e.want(409, "DELETE", "/buckets/racy", nil); code(out) != zfsapi.CodeNotEmpty {
+		t.Fatalf("code %s", out)
+	}
+	e.fake.Hook = nil
+	calls = e.fake.Calls()
+	if j := strings.Join(calls[len(calls)-1], " "); j != "inherit readonly "+parent+"/racy" {
+		t.Errorf("not made writable again: %s", j)
+	}
+	if !e.fake.IsDataset(parent + "/racy") {
+		t.Error("destroyed anyway")
 	}
 	// Plain directories aren't ours to destroy.
 	e.mkBucket("plain")
@@ -388,6 +565,41 @@ func TestRestore(t *testing.T) {
 		}
 		return nil
 	})
+
+	// Setuid bits and foreign xattrs never come back; FIFOs aren't opened;
+	// paths too long to be keys are skipped and counted; walks are bounded.
+	snapDir := filepath.Join(e.root, "photos/.zfs/snapshot", snap.Name)
+	os.Chmod(filepath.Join(snapDir, "a.txt"), 0o4755)
+	if err := syscall.Mkfifo(filepath.Join(snapDir, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	long := snapDir
+	for i := 0; i < 5; i++ {
+		long = filepath.Join(long, strings.Repeat(string(rune('a'+i)), 250))
+	}
+	os.MkdirAll(long, 0o750)
+	os.WriteFile(filepath.Join(long, "deep.txt"), []byte("deep"), 0o640)
+
+	e.want(200, "POST", base+"/restore", zfsapi.Restore{Key: "a.txt"})
+	if st, _ := os.Stat(a); st.Mode()&os.ModeSetuid != 0 || st.Mode().Perm() != 0o755 {
+		t.Errorf("restored mode %v", st.Mode())
+	}
+	if got, _ := e.do("GET", base+"/object?key=pipe", nil); got != 400 {
+		t.Errorf("fifo: %d", got)
+	}
+	if got, _ := e.do("POST", base+"/restore", zfsapi.Restore{Key: "pipe"}); got == 200 {
+		t.Error("restored a fifo")
+	}
+	json.Unmarshal(e.want(200, "POST", base+"/restore", zfsapi.Restore{All: true}), &res)
+	if res.Objects != 3 || res.Skipped != 1 {
+		t.Errorf("restore all with a long path: %+v", res)
+	}
+	maxWalk = 2
+	got, out := e.do("POST", base+"/restore", zfsapi.Restore{All: true})
+	maxWalk = 200000
+	if got != 400 || !strings.Contains(string(out), "too many") {
+		t.Errorf("unbounded walk: %d %s", got, out)
+	}
 
 	e.want(400, "POST", base+"/restore", zfsapi.Restore{})
 	e.want(400, "POST", base+"/restore", zfsapi.Restore{Key: "a.txt", Prefix: "dir/"})

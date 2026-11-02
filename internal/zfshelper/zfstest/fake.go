@@ -24,13 +24,26 @@ type snap struct {
 
 // Fake answers the zfs commands the helper runs.
 type Fake struct {
-	mu       sync.Mutex
-	mounts   map[string]string // dataset -> mountpoint
-	props    map[string]map[string]string
-	snaps    map[string][]snap
-	calls    [][]string
-	Now      func() time.Time
-	FailNext map[string]error // first argument -> error for its next call
+	mu        sync.Mutex
+	mounts    map[string]string // dataset -> mountpoint
+	props     map[string]map[string]string
+	snaps     map[string][]snap
+	calls     [][]string
+	unmounted map[string]bool
+	Now       func() time.Time
+	FailNext  map[string]error // first argument -> error for its next call
+	// CreateButNoMount makes the next create make the dataset but fail
+	// to mount it, as a real mount failure would.
+	CreateButNoMount bool
+	// Hook, if set, sees each command before it runs.
+	Hook func(args []string)
+}
+
+// Unmount marks ds as not mounted, as zfs list would report it.
+func (f *Fake) Unmount(ds string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unmounted[ds] = true
 }
 
 // New makes a fake with parent mounted at root, creating root.
@@ -39,10 +52,11 @@ func New(parent, root string) (*Fake, error) {
 		return nil, err
 	}
 	return &Fake{
-		mounts: map[string]string{parent: root},
-		props:  map[string]map[string]string{},
-		snaps:  map[string][]snap{},
-		Now:    time.Now,
+		mounts:    map[string]string{parent: root},
+		props:     map[string]map[string]string{},
+		snaps:     map[string][]snap{},
+		unmounted: map[string]bool{},
+		Now:       time.Now,
 	}, nil
 }
 
@@ -88,6 +102,9 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, errors.New("no command")
 	}
+	if f.Hook != nil {
+		f.Hook(args)
+	}
 	if err := f.FailNext[args[0]]; err != nil {
 		delete(f.FailNext, args[0])
 		return nil, err
@@ -107,7 +124,11 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 			}
 			return []byte(b.String()), nil
 		}
-		return []byte(last + "\t" + mp + "\n"), nil
+		mounted := "yes"
+		if f.unmounted[last] {
+			mounted = "no"
+		}
+		return []byte(last + "\t" + mp + "\t" + mounted + "\n"), nil
 
 	case "get":
 		mp, ok := f.mounts[last]
@@ -152,10 +173,15 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if _, ok := f.mounts[last[:strings.LastIndex(last, "/")]]; !ok {
 			return nil, fmt.Errorf("cannot create '%s': parent does not exist", last)
 		}
+		f.mounts[last] = mp
+		if f.CreateButNoMount {
+			f.CreateButNoMount = false
+			f.unmounted[last] = true
+			return nil, fmt.Errorf("filesystem successfully created, but not mounted")
+		}
 		if err := os.Mkdir(mp, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 			return nil, err
 		}
-		f.mounts[last] = mp
 		return nil, nil
 
 	case "destroy":
@@ -183,12 +209,25 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		delete(f.mounts, last)
 		delete(f.snaps, last)
 		delete(f.props, last)
+		if f.unmounted[last] {
+			delete(f.unmounted, last)
+			return nil, nil
+		}
 		return nil, removeAll(mp)
 
 	case "set":
 		prop, val, _ := strings.Cut(args[1], "=")
-		if _, ok := f.mounts[last]; !ok {
+		old, ok := f.mounts[last]
+		if !ok {
 			return nil, noDataset(last)
+		}
+		if prop == "mountpoint" {
+			// Remount: the dataset's files move with it.
+			if err := os.Rename(old, val); err != nil {
+				return nil, fmt.Errorf("cannot mount '%s': %v", last, err)
+			}
+			f.mounts[last] = val
+			return nil, nil
 		}
 		if f.props[last] == nil {
 			f.props[last] = map[string]string{}

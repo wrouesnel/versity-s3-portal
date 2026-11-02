@@ -21,8 +21,11 @@ var errSymlink = errors.New("refusing to follow a symlink")
 
 const (
 	dirFlags  = syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
-	fileFlags = syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC | syscall.O_NONBLOCK
 	maxKeyLen = 1024
+	// oPath is O_PATH, which package syscall doesn't name.
+	oPath = 0x200000
+	// atRemoveDir is AT_REMOVEDIR, for unlinkat.
+	atRemoveDir = 0x200
 )
 
 // splitKey splits an object key into path components. A trailing slash
@@ -60,11 +63,15 @@ func symlinkErr(err error) error {
 	return err
 }
 
-// openRoot opens a directory the helper trusts by path: a bucket's root,
-// or a snapshot's, whose parents only root can change.
+// openRoot opens a directory the helper trusts by path: the buckets root,
+// a bucket's root or the staging directory, whose parents only root can
+// change. The last component must not be a link.
 func openRoot(path string) (int, error) {
 	fd, err := syscall.Open(path, dirFlags, 0)
 	if err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			err = errSymlink
+		}
 		return -1, &os.PathError{Op: "open", Path: path, Err: symlinkErr(err)}
 	}
 	return fd, nil
@@ -104,34 +111,87 @@ func openDirAt(dirfd int, parts []string, mkdir func(rel string, fd int) error) 
 	return fd, nil
 }
 
-// openFileAt opens the regular file parts below dirfd for reading.
+// openFileAt opens the regular file parts below dirfd for reading. It
+// first takes an O_PATH handle and checks that's a regular file, so a
+// FIFO or device is never opened, then reopens that same inode for
+// reading through /proc/self/fd and checks it's still the same one.
 func openFileAt(dirfd int, parts []string) (*os.File, error) {
 	dir, err := openDirAt(dirfd, parts[:len(parts)-1], nil)
 	if err != nil {
 		return nil, err
 	}
 	defer syscall.Close(dir)
-	fd, err := syscall.Openat(dir, parts[len(parts)-1], fileFlags, 0)
+	name := strings.Join(parts, "/")
+	pfd, err := syscall.Openat(dir, parts[len(parts)-1], oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, symlinkErr(err)
 	}
-	f := os.NewFile(uintptr(fd), strings.Join(parts, "/"))
-	st, err := f.Stat()
+	defer syscall.Close(pfd)
+	var want syscall.Stat_t
+	if err := syscall.Fstat(pfd, &want); err != nil {
+		return nil, err
+	}
+	if want.Mode&syscall.S_IFMT == syscall.S_IFLNK {
+		return nil, errSymlink
+	}
+	if want.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return nil, fmt.Errorf("%s is not a file", name)
+	}
+	fd, err := syscall.Open(fmt.Sprintf("/proc/self/fd/%d", pfd), syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		f.Close()
 		return nil, err
 	}
-	if !st.Mode().IsRegular() {
-		f.Close()
-		return nil, fmt.Errorf("%s is not a file", strings.Join(parts, "/"))
+	var got syscall.Stat_t
+	if err := syscall.Fstat(fd, &got); err != nil || got.Dev != want.Dev || got.Ino != want.Ino {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("%s changed while it was being opened", name)
 	}
-	// Reads should block normally; O_NONBLOCK only kept a FIFO from
-	// hanging the open.
-	if err := syscall.SetNonblock(fd, false); err != nil {
-		f.Close()
-		return nil, err
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+// sameFilesystem says whether two open directories are on the same
+// filesystem. Each ZFS dataset has its own fsid, so a bucket's root is on
+// a different one from its parent only when its dataset is really
+// mounted there.
+func sameFilesystem(a, b int) (bool, error) {
+	var sa, sb syscall.Statfs_t
+	if err := syscall.Fstatfs(a, &sa); err != nil {
+		return false, err
 	}
-	return f, nil
+	if err := syscall.Fstatfs(b, &sb); err != nil {
+		return false, err
+	}
+	var da, db syscall.Stat_t
+	if err := syscall.Fstat(a, &da); err != nil {
+		return false, err
+	}
+	if err := syscall.Fstat(b, &db); err != nil {
+		return false, err
+	}
+	return sa.Fsid == sb.Fsid && da.Dev == db.Dev, nil
+}
+
+// lstatAt stats name in dirfd without following a symlink. (Package
+// syscall has no portable fstatat, so this opens an O_PATH handle.)
+func lstatAt(dirfd int, name string, st *syscall.Stat_t) error {
+	fd, err := syscall.Openat(dirfd, name, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	return syscall.Fstat(fd, st)
+}
+
+func unlinkatDir(dirfd int, name string) error {
+	p, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return err
+	}
+	_, _, errno := syscall.Syscall(syscall.SYS_UNLINKAT, uintptr(dirfd), uintptr(unsafe.Pointer(p)), atRemoveDir)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 // ------------------------------------------------------------------ xattrs
@@ -195,6 +255,13 @@ func fsetxattr(fd int, name string, value []byte) error {
 	return nil
 }
 
+// copiedXattr says whether an xattr is carried over when a file or
+// directory is copied or moved: the gateway's own (user.*) and POSIX
+// ACLs, and nothing else (never security.* or trusted.*).
+func copiedXattr(name string) bool {
+	return strings.HasPrefix(name, "user.") || strings.HasPrefix(name, "system.posix_acl_")
+}
+
 // xattrs is a file's extended attributes.
 type xattrs map[string][]byte
 
@@ -205,6 +272,9 @@ func readXattrs(fd int) (xattrs, error) {
 	}
 	out := xattrs{}
 	for _, n := range names {
+		if !copiedXattr(n) {
+			continue
+		}
 		v, err := fgetxattr(fd, n)
 		if errors.Is(err, syscall.ENODATA) {
 			continue
@@ -218,10 +288,12 @@ func readXattrs(fd int) (xattrs, error) {
 }
 
 // writeXattrs sets attrs on fd. The gateway's own attributes (user.*)
-// must all be set; others, such as POSIX ACLs, are copied when the
-// filesystem allows.
+// must all be set; POSIX ACLs are copied when the filesystem allows.
 func writeXattrs(fd int, attrs xattrs) error {
 	for n, v := range attrs {
+		if !copiedXattr(n) {
+			continue
+		}
 		if err := fsetxattr(fd, n, v); err != nil && strings.HasPrefix(n, "user.") {
 			return fmt.Errorf("set xattr %s: %w", n, err)
 		}
@@ -231,13 +303,16 @@ func writeXattrs(fd int, attrs xattrs) error {
 
 // meta is what's kept of a file or directory when it's copied or moved.
 type meta struct {
-	uid, gid int
-	mode     uint32 // permission bits only
-	mtime    syscall.Timespec
-	atime    syscall.Timespec
-	xattrs   xattrs
+	UID    int              `json:"uid"`
+	GID    int              `json:"gid"`
+	Mode   uint32           `json:"mode"` // permission bits, and sticky on directories
+	Mtime  syscall.Timespec `json:"mtime"`
+	Atime  syscall.Timespec `json:"atime"`
+	Xattrs xattrs           `json:"xattrs"`
 }
 
+// readMeta reads fd's metadata. Setuid and setgid bits are never kept,
+// and sticky only on directories.
 func readMeta(fd int) (*meta, error) {
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
@@ -247,25 +322,29 @@ func readMeta(fd int) (*meta, error) {
 	if err != nil {
 		return nil, err
 	}
+	mode := st.Mode & 0o777
+	if st.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+		mode |= st.Mode & syscall.S_ISVTX
+	}
 	return &meta{
-		uid: int(st.Uid), gid: int(st.Gid), mode: st.Mode & 0o7777,
-		mtime: st.Mtim, atime: st.Atim, xattrs: x,
+		UID: int(st.Uid), GID: int(st.Gid), Mode: mode,
+		Mtime: st.Mtim, Atime: st.Atim, Xattrs: x,
 	}, nil
 }
 
 // apply sets m on fd, times last since setting the others can bump them.
 func (m *meta) apply(fd int, times bool) error {
-	if err := syscall.Fchown(fd, m.uid, m.gid); err != nil {
+	if err := syscall.Fchown(fd, m.UID, m.GID); err != nil {
 		return fmt.Errorf("chown: %w", err)
 	}
-	if err := syscall.Fchmod(fd, m.mode); err != nil {
+	if err := syscall.Fchmod(fd, m.Mode&(0o777|syscall.S_ISVTX)); err != nil {
 		return fmt.Errorf("chmod: %w", err)
 	}
-	if err := writeXattrs(fd, m.xattrs); err != nil {
+	if err := writeXattrs(fd, m.Xattrs); err != nil {
 		return err
 	}
 	if times {
-		tv := []syscall.Timeval{syscall.NsecToTimeval(syscall.TimespecToNsec(m.atime)), syscall.NsecToTimeval(syscall.TimespecToNsec(m.mtime))}
+		tv := []syscall.Timeval{syscall.NsecToTimeval(syscall.TimespecToNsec(m.Atime)), syscall.NsecToTimeval(syscall.TimespecToNsec(m.Mtime))}
 		if err := syscall.Futimes(fd, tv); err != nil {
 			return fmt.Errorf("set times: %w", err)
 		}
@@ -281,6 +360,7 @@ func copyFileInto(src *os.File, dirfd int, name string) error {
 	if err != nil {
 		return err
 	}
+	m.Mode &= 0o777
 	var st syscall.Stat_t
 	if err := lstatAt(dirfd, name, &st); err == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR {
 		return fmt.Errorf("%s is a folder in the live bucket", name)
@@ -317,20 +397,6 @@ func copyFileInto(src *os.File, dirfd int, name string) error {
 	return nil
 }
 
-// oPath is O_PATH, which package syscall doesn't name.
-const oPath = 0x200000
-
-// lstatAt stats name in dirfd without following a symlink. (Package
-// syscall has no portable fstatat, so this opens an O_PATH handle.)
-func lstatAt(dirfd int, name string, st *syscall.Stat_t) error {
-	fd, err := syscall.Openat(dirfd, name, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(fd)
-	return syscall.Fstat(fd, st)
-}
-
 func randomSuffix() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
@@ -339,8 +405,15 @@ func randomSuffix() string {
 	return fmt.Sprintf("%x", b)
 }
 
+// maxDirEntries bounds how many entries one directory may have before the
+// helper gives up on it.
+var maxDirEntries = 100000
+
+var errTooManyEntries = errors.New("a folder has too many entries")
+
 // readDirAt lists the directory fd (without . and ..), with each entry's
-// lstat. The fd is left open.
+// lstat, reading in batches and stopping at maxDirEntries. The fd is left
+// open.
 func readDirAt(fd int) ([]dirEntry, error) {
 	dup, err := syscall.Dup(fd)
 	if err != nil {
@@ -352,22 +425,29 @@ func readDirAt(fd int) ([]dirEntry, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	names, err := f.Readdirnames(-1)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]dirEntry, 0, len(names))
-	for _, n := range names {
-		var st syscall.Stat_t
-		if err := lstatAt(fd, n, &st); err != nil {
-			if errors.Is(err, syscall.ENOENT) {
-				continue
+	var out []dirEntry
+	for {
+		names, err := f.Readdirnames(1024)
+		for _, n := range names {
+			var st syscall.Stat_t
+			if err := lstatAt(fd, n, &st); err != nil {
+				if errors.Is(err, syscall.ENOENT) {
+					continue
+				}
+				return nil, err
 			}
+			out = append(out, dirEntry{name: n, st: st})
+		}
+		if len(out) > maxDirEntries {
+			return nil, errTooManyEntries
+		}
+		if errors.Is(err, io.EOF) || (err == nil && len(names) == 0) {
+			return out, nil
+		}
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, dirEntry{name: n, st: st})
 	}
-	return out, nil
 }
 
 type dirEntry struct {
@@ -377,5 +457,3 @@ type dirEntry struct {
 
 func (e dirEntry) isDir() bool     { return e.st.Mode&syscall.S_IFMT == syscall.S_IFDIR }
 func (e dirEntry) isRegular() bool { return e.st.Mode&syscall.S_IFMT == syscall.S_IFREG }
-
-func unsafePointer(p *byte) unsafe.Pointer { return unsafe.Pointer(p) }

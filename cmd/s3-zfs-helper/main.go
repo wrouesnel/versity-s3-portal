@@ -33,12 +33,17 @@ func main() {
 func run() error {
 	parent := flag.String("parent", "storage/s3/buckets", "dataset whose children are buckets")
 	root := flag.String("root", "/storage/s3/buckets", "where the parent dataset is mounted")
+	staging := flag.String("staging", "", "root-only directory outside -root where new datasets are set up (default: .s3-zfs-staging beside -root)")
+	stateDir := flag.String("state-dir", "/var/lib/s3-zfs-helper", "root-only directory for metadata saved while adopting a bucket")
 	zfsPath := flag.String("zfs", "/usr/sbin/zfs", "the zfs command")
 	socket := flag.String("socket", "", "unix socket to listen on, when not socket-activated")
 	group := flag.Int("socket-group", -1, "gid to own -socket, which is made mode 0660")
 	flag.Parse()
 
-	srv := zfshelper.New(zfshelper.Config{Parent: *parent, Root: *root, Run: zfshelper.ExecRunner(*zfsPath)})
+	srv := zfshelper.New(zfshelper.Config{
+		Parent: *parent, Root: *root, Staging: *staging, StateDir: *stateDir,
+		Run: zfshelper.ExecRunner(*zfsPath),
+	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := srv.Check(ctx); err != nil {

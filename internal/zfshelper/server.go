@@ -5,8 +5,9 @@
 //
 // It runs as root on the host, so it trusts nothing it's sent: bucket and
 // snapshot names must match zfsapi's patterns, it only touches datasets
-// that are direct children of its parent dataset, and every path below a
-// bucket is walked without following symlinks.
+// that are direct children of its parent dataset and really mounted where
+// they should be, and every path below a bucket is walked without
+// following symlinks.
 package zfshelper
 
 import (
@@ -17,7 +18,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,17 +39,33 @@ type Config struct {
 	// Root is where Parent is mounted, and so where the gateway keeps
 	// buckets, e.g. /storage/s3/buckets.
 	Root string
+	// Staging is a root-only (0700) directory on the same host, outside
+	// Root, where new datasets are first mounted and set up before they
+	// take a bucket's place. Default: .s3-zfs-staging beside Root.
+	Staging string
+	// StateDir keeps a bucket directory's metadata while it's being
+	// adopted, so a crash can't lose it. Default /var/lib/s3-zfs-helper.
+	StateDir string
 	// Run runs zfs.
 	Run Runner
 	Log *slog.Logger
 	// Now is the clock, for snapshot names.
 	Now func() time.Time
+	// MaxReads bounds concurrent read requests (default 8), and
+	// MaxRestores concurrent restores (default 2).
+	MaxReads, MaxRestores int
+	// SkipMountCheck turns off the check that a bucket's dataset is a
+	// different filesystem from its parent, for tests with a fake zfs.
+	SkipMountCheck bool
 }
 
 type Server struct {
 	Config
-	// mu serialises everything that changes datasets or files.
-	mu sync.Mutex
+
+	locksMu sync.Mutex
+	locks   map[string]*sync.Mutex
+	reads   chan struct{}
+	restore chan struct{}
 }
 
 func New(c Config) *Server {
@@ -57,7 +76,53 @@ func New(c Config) *Server {
 		c.Now = time.Now
 	}
 	c.Root = strings.TrimRight(c.Root, "/")
-	return &Server{Config: c}
+	if c.Staging == "" {
+		c.Staging = filepath.Join(filepath.Dir(c.Root), ".s3-zfs-staging")
+	}
+	if c.StateDir == "" {
+		c.StateDir = "/var/lib/s3-zfs-helper"
+	}
+	if c.MaxReads <= 0 {
+		c.MaxReads = 8
+	}
+	if c.MaxRestores <= 0 {
+		c.MaxRestores = 2
+	}
+	return &Server{
+		Config:  c,
+		locks:   map[string]*sync.Mutex{},
+		reads:   make(chan struct{}, c.MaxReads),
+		restore: make(chan struct{}, c.MaxRestores),
+	}
+}
+
+// lock serialises changes to one bucket, so a long restore in one bucket
+// doesn't hold up the others.
+func (s *Server) lock(bucket string) func() {
+	s.locksMu.Lock()
+	m, ok := s.locks[bucket]
+	if !ok {
+		m = &sync.Mutex{}
+		s.locks[bucket] = m
+	}
+	s.locksMu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
+// acquire takes a slot in sem, waiting a little, or reports the helper
+// busy.
+func acquire(ctx context.Context, sem chan struct{}) (func(), error) {
+	t := time.NewTimer(10 * time.Second)
+	defer t.Stop()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-t.C:
+		return nil, &apiError{http.StatusServiceUnavailable, zfsapi.CodeBusy, "the zfs helper is busy; try again shortly"}
+	}
 }
 
 func (s *Server) run(ctx context.Context, args ...string) ([]byte, error) {
@@ -66,17 +131,53 @@ func (s *Server) run(ctx context.Context, args ...string) ([]byte, error) {
 	return s.Run(ctx, args...)
 }
 
-// Check makes sure the parent dataset is mounted where Root says.
+// Check makes sure the parent dataset is mounted where Root says, sets up
+// the staging and state directories, and finishes or undoes any adoption
+// a crash interrupted.
 func (s *Server) Check(ctx context.Context) error {
-	mp, ok, err := s.mountpoint(ctx, s.Parent)
+	st, err := s.state(ctx, s.Parent)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !st.exists {
 		return fmt.Errorf("parent dataset %s doesn't exist", s.Parent)
 	}
-	if mp != s.Root {
-		return fmt.Errorf("parent dataset %s is mounted at %s, not %s", s.Parent, mp, s.Root)
+	if st.mountpoint != s.Root || !st.mounted {
+		return fmt.Errorf("parent dataset %s isn't mounted at %s (mountpoint %s, mounted %v)", s.Parent, s.Root, st.mountpoint, st.mounted)
+	}
+	if strings.HasPrefix(s.Staging+"/", s.Root+"/") {
+		return fmt.Errorf("the staging directory %s must be outside %s", s.Staging, s.Root)
+	}
+	for _, dir := range []string{s.Staging, s.StateDir} {
+		if err := rootOnlyDir(dir); err != nil {
+			return err
+		}
+	}
+	return s.Recover(ctx)
+}
+
+// rootOnlyDir makes dir if it's missing, and makes sure it's a directory
+// (not a link) only its owner can use.
+func rootOnlyDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fd, err := openRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("%s isn't owned by uid %d", dir, os.Geteuid())
+	}
+	if st.Mode&0o077 != 0 {
+		if err := syscall.Fchmod(fd, 0o700); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -98,37 +199,59 @@ func notFound(format string, args ...any) error {
 	return &apiError{http.StatusNotFound, zfsapi.CodeNotFound, fmt.Sprintf(format, args...)}
 }
 
+func notDataset(bucket, why string) error {
+	return &apiError{http.StatusNotFound, zfsapi.CodeNotDataset, fmt.Sprintf("bucket %s isn't a dataset: %s", bucket, why)}
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	h := func(pattern string, fn func(w http.ResponseWriter, r *http.Request) error) {
+	h := func(pattern string, read bool, fn func(w http.ResponseWriter, r *http.Request) error) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			if read {
+				release, err := acquire(r.Context(), s.reads)
+				if err != nil {
+					s.fail(w, r, err)
+					return
+				}
+				defer release()
+			}
 			if err := fn(w, r); err != nil {
 				s.fail(w, r, err)
 			}
 		})
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
-	h("POST /buckets/{b}/adopt", s.adopt)
-	h("GET /buckets/{b}", s.getBucket)
-	h("DELETE /buckets/{b}", s.destroy)
-	h("PUT /buckets/{b}/quota", s.putQuota)
-	h("PUT /buckets/{b}/backup", s.putBackup)
-	h("GET /buckets/{b}/snapshots", s.listSnapshots)
-	h("POST /buckets/{b}/snapshots", s.createSnapshot)
-	h("DELETE /buckets/{b}/snapshots/{s}", s.deleteSnapshot)
-	h("GET /buckets/{b}/snapshots/{s}/list", s.listSnapshotObjects)
-	h("GET /buckets/{b}/snapshots/{s}/object", s.getSnapshotObject)
-	h("POST /buckets/{b}/snapshots/{s}/restore", s.restore)
+	h("POST /buckets/{b}/adopt", false, s.adopt)
+	h("GET /buckets/{b}", true, s.getBucket)
+	h("DELETE /buckets/{b}", false, s.destroy)
+	h("PUT /buckets/{b}/quota", false, s.putQuota)
+	h("PUT /buckets/{b}/backup", false, s.putBackup)
+	h("GET /buckets/{b}/snapshots", true, s.listSnapshots)
+	h("POST /buckets/{b}/snapshots", false, s.createSnapshot)
+	h("DELETE /buckets/{b}/snapshots/{s}", false, s.deleteSnapshot)
+	h("GET /buckets/{b}/snapshots/{s}/list", true, s.listSnapshotObjects)
+	h("GET /buckets/{b}/snapshots/{s}/object", true, s.getSnapshotObject)
+	h("POST /buckets/{b}/snapshots/{s}/restore", false, s.restoreHandler)
 	return mux
 }
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	var ae *apiError
-	if !errors.As(err, &ae) {
+	switch {
+	case errors.As(err, &ae):
+		if ae.status >= 500 {
+			s.Log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+		}
+	case errors.Is(err, errTooManyEntries):
+		ae = &apiError{http.StatusBadRequest, zfsapi.CodeBadRequest, err.Error()}
+	case errors.Is(err, errSymlink):
+		ae = &apiError{http.StatusBadRequest, zfsapi.CodeBadRequest, err.Error()}
+	case errors.Is(err, context.Canceled):
+		s.Log.Warn("request cancelled", "method", r.Method, "path", r.URL.Path)
+		ae = &apiError{http.StatusServiceUnavailable, zfsapi.CodeBusy, "cancelled"}
+	default:
 		ae = &apiError{http.StatusInternalServerError, zfsapi.CodeInternal, err.Error()}
-		s.Log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
-	} else if ae.status >= 500 {
 		s.Log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	}
 	writeJSON(w, ae.status, zfsapi.Error{Error: ae.msg, Code: ae.code})
@@ -149,8 +272,9 @@ func readJSON(r *http.Request, v any) error {
 	return nil
 }
 
-// bucket validates the request's bucket and returns its dataset and path.
-func (s *Server) bucket(r *http.Request) (name, ds, dir string, err error) {
+// bucketName validates the request's bucket and returns its dataset and
+// directory.
+func (s *Server) bucketName(r *http.Request) (name, ds, dir string, err error) {
 	name = r.PathValue("b")
 	if !zfsapi.BucketName.MatchString(name) {
 		return "", "", "", badRequest("bad bucket name %q", name)
@@ -158,27 +282,81 @@ func (s *Server) bucket(r *http.Request) (name, ds, dir string, err error) {
 	return name, s.Parent + "/" + name, s.Root + "/" + name, nil
 }
 
-// dataset is bucket, also requiring the bucket to be one of our datasets.
-func (s *Server) dataset(r *http.Request) (name, ds, dir string, err error) {
-	name, ds, dir, err = s.bucket(r)
-	if err != nil {
-		return
-	}
-	mp, ok, err := s.mountpoint(r.Context(), ds)
-	if err != nil {
-		return
-	}
-	if !ok {
-		return "", "", "", &apiError{http.StatusNotFound, zfsapi.CodeNotDataset, fmt.Sprintf("bucket %s isn't a dataset", name)}
-	}
-	if mp != dir {
-		return "", "", "", &apiError{http.StatusConflict, zfsapi.CodeConflict, fmt.Sprintf("dataset %s is mounted at %s, not %s", ds, mp, dir)}
-	}
-	return
+// bucket is a bucket that's one of our datasets, mounted where it should
+// be, with its root open.
+type bucket struct {
+	name, ds, dir string
+	fd            int
 }
 
-// snapshot validates the request's snapshot name and checks it exists.
-func (s *Server) snapshot(r *http.Request, ds string) (string, error) {
+func (b *bucket) close() { syscall.Close(b.fd) }
+
+// dataset checks the request's bucket is a dataset mounted at its
+// directory, and opens its root. Callers close it.
+func (s *Server) dataset(r *http.Request) (*bucket, error) {
+	name, ds, dir, err := s.bucketName(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.openDataset(r.Context(), name, ds, dir)
+}
+
+func (s *Server) openDataset(ctx context.Context, name, ds, dir string) (*bucket, error) {
+	st, err := s.state(ctx, ds)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !st.exists:
+		return nil, notDataset(name, "no such dataset")
+	case st.mountpoint != dir:
+		return nil, &apiError{http.StatusConflict, zfsapi.CodeConflict, fmt.Sprintf("dataset %s is mounted at %s, not %s", ds, st.mountpoint, dir)}
+	case !st.mounted:
+		return nil, notDataset(name, "its dataset isn't mounted")
+	}
+	fd, err := s.openMounted(dir, s.Root)
+	if err != nil {
+		if errors.Is(err, errNotMounted) {
+			return nil, notDataset(name, "its directory isn't the dataset's mount")
+		}
+		return nil, err
+	}
+	return &bucket{name: name, ds: ds, dir: dir, fd: fd}, nil
+}
+
+var errNotMounted = errors.New("not a separate mount")
+
+// openMounted opens dir, a dataset's mountpoint, and checks it's really a
+// different filesystem from parentDir, so the helper never mistakes a
+// plain directory in the parent for a dataset.
+func (s *Server) openMounted(dir, parentDir string) (int, error) {
+	fd, err := openRoot(dir)
+	if err != nil {
+		return -1, err
+	}
+	if s.SkipMountCheck {
+		return fd, nil
+	}
+	pfd, err := openRoot(parentDir)
+	if err != nil {
+		syscall.Close(fd)
+		return -1, err
+	}
+	same, err := sameFilesystem(fd, pfd)
+	syscall.Close(pfd)
+	if err == nil && same {
+		err = errNotMounted
+	}
+	if err != nil {
+		syscall.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+// snapshotName validates the request's snapshot name and checks ds has
+// it.
+func (s *Server) snapshotName(r *http.Request, ds string) (string, error) {
 	snap := r.PathValue("s")
 	if !zfsapi.SnapshotName.MatchString(snap) {
 		return "", badRequest("bad snapshot name %q", snap)
@@ -193,162 +371,29 @@ func (s *Server) snapshot(r *http.Request, ds string) (string, error) {
 	return snap, nil
 }
 
+// snapRoot opens a snapshot's root, reached from the bucket's root one
+// component at a time (.zfs, snapshot, the name) without following links.
+func (s *Server) snapRoot(r *http.Request, b *bucket) (int, error) {
+	snap, err := s.snapshotName(r, b.ds)
+	if err != nil {
+		return -1, err
+	}
+	return openDirAt(b.fd, []string{".zfs", "snapshot", snap}, nil)
+}
+
 // internal says whether a name at a bucket's root is the gateway's or
 // ZFS's rather than an object.
 func internal(name string) bool { return name == ".sgwtmp" || name == ".zfs" }
 
-// ------------------------------------------------------------------ adopt
-
-// adopt turns a bucket the gateway just made, still an empty directory,
-// into a dataset mounted in its place, carrying over the directory's
-// owner, mode and xattrs (where the gateway keeps the bucket's owner, ACL
-// and policy). If it's already a dataset, it does nothing.
-func (s *Server) adopt(w http.ResponseWriter, r *http.Request) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ctx := r.Context()
-	name, ds, dir, err := s.bucket(r)
-	if err != nil {
-		return err
-	}
-	mp, exists, err := s.mountpoint(ctx, ds)
-	if err != nil {
-		return err
-	}
-	if exists {
-		if mp != dir {
-			return &apiError{http.StatusConflict, zfsapi.CodeConflict, fmt.Sprintf("dataset %s is mounted at %s, not %s", ds, mp, dir)}
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"dataset": ds})
-		return nil
-	}
-
-	fd, err := openRoot(dir)
-	if errors.Is(err, syscall.ENOENT) {
-		return notFound("no bucket directory %s", dir)
-	}
-	if err != nil {
-		return err
-	}
-	m, err := readMeta(fd)
-	if err == nil {
-		err = removeEmptyInternals(fd)
-	}
-	syscall.Close(fd)
-	if err != nil {
-		return err
-	}
-
-	if err := syscall.Rmdir(dir); err != nil {
-		return fmt.Errorf("remove bucket directory: %w", err)
-	}
-	// putBack restores the directory as it was, if adopting fails.
-	putBack := func() {
-		if err := syscall.Mkdir(dir, 0o700); err != nil {
-			s.Log.Error("couldn't recreate bucket directory", "bucket", name, "err", err)
-			return
-		}
-		fd, err := openRoot(dir)
-		if err == nil {
-			err = m.apply(fd, true)
-			syscall.Close(fd)
-		}
-		if err != nil {
-			s.Log.Error("couldn't restore bucket directory's metadata", "bucket", name, "err", err)
-		}
-	}
-	if _, err := s.run(ctx, "create", "-o", "mountpoint="+dir, ds); err != nil {
-		putBack()
-		return err
-	}
-	fd, err = openRoot(dir)
-	if err == nil {
-		err = m.apply(fd, true)
-		syscall.Close(fd)
-	}
-	if err != nil {
-		if _, derr := s.run(context.WithoutCancel(ctx), "destroy", ds); derr != nil {
-			s.Log.Error("couldn't destroy half-adopted dataset", "dataset", ds, "err", derr)
-		} else {
-			syscall.Rmdir(dir)
-			putBack()
-		}
-		return fmt.Errorf("set up dataset root: %w", err)
-	}
-	s.Log.Info("adopted bucket", "bucket", name, "dataset", ds)
-	writeJSON(w, http.StatusCreated, map[string]string{"dataset": ds})
-	return nil
-}
-
-// removeEmptyInternals checks the bucket directory fd holds nothing but
-// the gateway's temporary directory, itself holding only directories, and
-// removes those. Anything else means it isn't a new, empty bucket.
-func removeEmptyInternals(fd int) error {
-	ents, err := readDirAt(fd)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if e.name != ".sgwtmp" || !e.isDir() {
-			return &apiError{http.StatusConflict, zfsapi.CodeNotEmpty, "the bucket directory isn't empty"}
-		}
-	}
-	for _, e := range ents {
-		if err := removeDirsOnly(fd, e.name); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// removeDirsOnly removes the directory name below dirfd, and directories
-// in it, failing if it holds anything else.
-func removeDirsOnly(dirfd int, name string) error {
-	fd, err := openDirAt(dirfd, []string{name}, nil)
-	if err != nil {
-		return err
-	}
-	ents, err := readDirAt(fd)
-	if err == nil {
-		for _, e := range ents {
-			if !e.isDir() {
-				err = &apiError{http.StatusConflict, zfsapi.CodeNotEmpty, "the bucket has uploads in progress"}
-				break
-			}
-			if err = removeDirsOnly(fd, e.name); err != nil {
-				break
-			}
-		}
-	}
-	syscall.Close(fd)
-	if err != nil {
-		return err
-	}
-	return unlinkatDir(dirfd, name)
-}
-
-const atRemoveDir = 0x200
-
-func unlinkatDir(dirfd int, name string) error {
-	p, err := syscall.BytePtrFromString(name)
-	if err != nil {
-		return err
-	}
-	_, _, errno := syscall.Syscall(syscall.SYS_UNLINKAT, uintptr(dirfd), uintptr(unsafePointer(p)), atRemoveDir)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------- buckets
 
 func (s *Server) getBucket(w http.ResponseWriter, r *http.Request) error {
-	_, ds, _, err := s.dataset(r)
+	b, err := s.dataset(r)
 	if err != nil {
 		return err
 	}
-	info, err := s.info(r.Context(), ds)
+	b.close()
+	info, err := s.info(r.Context(), b.ds)
 	if err != nil {
 		return err
 	}
@@ -356,40 +401,86 @@ func (s *Server) getBucket(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// destroy destroys an empty bucket's dataset, with its snapshots (the
-// host's included). Empty means what the gateway means: nothing at the
-// dataset's root but the gateway's temporary directory. An empty folder
-// is a folder object, so it counts.
-func (s *Server) destroy(w http.ResponseWriter, r *http.Request) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	name, ds, dir, err := s.dataset(r)
-	if err != nil {
-		return err
-	}
-	fd, err := openRoot(dir)
-	if err != nil {
-		return err
-	}
+// isEmpty says whether a bucket's root holds nothing but the gateway's
+// and ZFS's internals, which is what empty means to the gateway. An empty
+// folder is a folder object, so it counts.
+func isEmpty(fd int) (bool, error) {
 	ents, err := readDirAt(fd)
-	syscall.Close(fd)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, e := range ents {
 		if !internal(e.name) {
-			return &apiError{http.StatusConflict, zfsapi.CodeNotEmpty, fmt.Sprintf("bucket %s isn't empty", name)}
+			return false, nil
 		}
 	}
-	if _, err := s.run(r.Context(), "destroy", "-r", ds); err != nil {
+	return true, nil
+}
+
+// destroy destroys an empty bucket's dataset with its portal snapshots.
+// It refuses while the dataset has any other snapshot (the host's weekly
+// ones), since destroying it would destroy those too. The dataset is made
+// read-only before the final emptiness check, so nothing can be written
+// between the check and the destroy.
+func (s *Server) destroy(w http.ResponseWriter, r *http.Request) error {
+	name, _, _, err := s.bucketName(r)
+	if err != nil {
+		return err
+	}
+	defer s.lock(name)()
+	ctx := r.Context()
+	b, err := s.dataset(r)
+	if err != nil {
+		return err
+	}
+	defer b.close()
+	snaps, err := s.allSnapshots(ctx, b.ds)
+	if err != nil {
+		return err
+	}
+	var host []string
+	for _, sn := range snaps {
+		if !zfsapi.SnapshotName.MatchString(sn.Name) {
+			host = append(host, sn.Name)
+		}
+	}
+	if len(host) > 0 {
+		return &apiError{http.StatusConflict, zfsapi.CodeHasHostSnapshots,
+			fmt.Sprintf("bucket %s has %d snapshots that aren't the portal's (e.g. %s); they must be removed on the host first", name, len(host), host[0])}
+	}
+	notEmpty := &apiError{http.StatusConflict, zfsapi.CodeNotEmpty, fmt.Sprintf("bucket %s isn't empty", name)}
+	if empty, err := isEmpty(b.fd); err != nil || !empty {
+		if err != nil {
+			return err
+		}
+		return notEmpty
+	}
+	if err := s.setReadonly(ctx, b.ds, true); err != nil {
+		return err
+	}
+	writable := func() {
+		if err := s.setReadonly(context.WithoutCancel(ctx), b.ds, false); err != nil {
+			s.Log.Error("couldn't make the bucket writable again", "bucket", name, "err", err)
+		}
+	}
+	empty, err := isEmpty(b.fd)
+	if err != nil || !empty {
+		writable()
+		if err != nil {
+			return err
+		}
+		return notEmpty
+	}
+	if _, err := s.run(ctx, "destroy", "-r", b.ds); err != nil {
+		writable()
 		return err
 	}
 	// zfs normally removes the mountpoint; if it's left, remove it so the
 	// gateway no longer sees a bucket there.
-	if err := syscall.Rmdir(dir); err != nil && !errors.Is(err, syscall.ENOENT) {
-		s.Log.Warn("couldn't remove the old mountpoint", "dir", dir, "err", err)
+	if err := syscall.Rmdir(b.dir); err != nil && !errors.Is(err, syscall.ENOENT) {
+		s.Log.Warn("couldn't remove the old mountpoint", "dir", b.dir, "err", err)
 	}
-	s.Log.Info("destroyed bucket dataset", "bucket", name, "dataset", ds)
+	s.Log.Info("destroyed bucket dataset", "bucket", name, "dataset", b.ds)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -402,13 +493,17 @@ func (s *Server) putQuota(w http.ResponseWriter, r *http.Request) error {
 	if q.Bytes < 0 {
 		return badRequest("quota can't be negative")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	name, ds, _, err := s.dataset(r)
+	name, _, _, err := s.bucketName(r)
 	if err != nil {
 		return err
 	}
-	if err := s.setRefquota(r.Context(), ds, q.Bytes); err != nil {
+	defer s.lock(name)()
+	b, err := s.dataset(r)
+	if err != nil {
+		return err
+	}
+	b.close()
+	if err := s.setRefquota(r.Context(), b.ds, q.Bytes); err != nil {
 		return err
 	}
 	s.Log.Info("set quota", "bucket", name, "bytes", q.Bytes)
@@ -417,20 +512,24 @@ func (s *Server) putQuota(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Server) putBackup(w http.ResponseWriter, r *http.Request) error {
-	var b zfsapi.Backup
-	if err := readJSON(r, &b); err != nil {
+	var req zfsapi.Backup
+	if err := readJSON(r, &req); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	name, ds, _, err := s.dataset(r)
+	name, _, _, err := s.bucketName(r)
 	if err != nil {
 		return err
 	}
-	if err := s.setBackup(r.Context(), ds, b.Include); err != nil {
+	defer s.lock(name)()
+	b, err := s.dataset(r)
+	if err != nil {
 		return err
 	}
-	s.Log.Info("set backup", "bucket", name, "include", b.Include)
+	b.close()
+	if err := s.setBackup(r.Context(), b.ds, req.Include); err != nil {
+		return err
+	}
+	s.Log.Info("set backup", "bucket", name, "include", req.Include)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -438,11 +537,12 @@ func (s *Server) putBackup(w http.ResponseWriter, r *http.Request) error {
 // -------------------------------------------------------------- snapshots
 
 func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) error {
-	_, ds, _, err := s.dataset(r)
+	b, err := s.dataset(r)
 	if err != nil {
 		return err
 	}
-	snaps, err := s.snapshots(r.Context(), ds)
+	b.close()
+	snaps, err := s.snapshots(r.Context(), b.ds)
 	if err != nil {
 		return err
 	}
@@ -458,65 +558,141 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) error {
 	if req.Label != "" && !zfsapi.SnapshotLabel.MatchString(req.Label) {
 		return badRequest("labels are up to 32 lowercase letters, digits and hyphens")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	bucket, ds, _, err := s.dataset(r)
+	name, _, _, err := s.bucketName(r)
 	if err != nil {
 		return err
 	}
-	now := s.Now().UTC()
-	name := zfsapi.SnapshotPrefix + now.Format(zfsapi.SnapshotTimeFormat)
-	if req.Label != "" {
-		name += "-" + req.Label
+	defer s.lock(name)()
+	b, err := s.dataset(r)
+	if err != nil {
+		return err
 	}
-	if _, err := s.run(r.Context(), "snapshot", ds+"@"+name); err != nil {
+	b.close()
+	now := s.Now().UTC()
+	snap := zfsapi.SnapshotPrefix + now.Format(zfsapi.SnapshotTimeFormat)
+	if req.Label != "" {
+		snap += "-" + req.Label
+	}
+	if _, err := s.run(r.Context(), "snapshot", b.ds+"@"+snap); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			return &apiError{http.StatusConflict, zfsapi.CodeConflict, "a snapshot with that name already exists; try again in a second"}
 		}
 		return err
 	}
-	s.Log.Info("created snapshot", "bucket", bucket, "snapshot", name)
-	writeJSON(w, http.StatusCreated, zfsapi.Snapshot{Name: name, Created: now.Truncate(time.Second)})
+	s.Log.Info("created snapshot", "bucket", name, "snapshot", snap)
+	writeJSON(w, http.StatusCreated, zfsapi.Snapshot{Name: snap, Created: now.Truncate(time.Second)})
 	return nil
 }
 
 func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	bucket, ds, _, err := s.dataset(r)
+	name, _, _, err := s.bucketName(r)
 	if err != nil {
 		return err
 	}
-	snap, err := s.snapshot(r, ds)
+	defer s.lock(name)()
+	b, err := s.dataset(r)
 	if err != nil {
 		return err
 	}
-	if _, err := s.run(r.Context(), "destroy", ds+"@"+snap); err != nil {
+	b.close()
+	snap, err := s.snapshotName(r, b.ds)
+	if err != nil {
 		return err
 	}
-	s.Log.Info("destroyed snapshot", "bucket", bucket, "snapshot", snap)
+	if _, err := s.run(r.Context(), "destroy", b.ds+"@"+snap); err != nil {
+		return err
+	}
+	s.Log.Info("destroyed snapshot", "bucket", name, "snapshot", snap)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
-}
-
-// snapRoot opens a snapshot's root directory.
-func (s *Server) snapRoot(r *http.Request) (fd int, dir string, err error) {
-	_, ds, dir, err := s.dataset(r)
-	if err != nil {
-		return -1, "", err
-	}
-	snap, err := s.snapshot(r, ds)
-	if err != nil {
-		return -1, "", err
-	}
-	fd, err = openRoot(dir + "/.zfs/snapshot/" + snap)
-	return fd, dir, err
 }
 
 const maxListKeys = 1000
 
 // maxWalk bounds a recursive listing or restore.
-const maxWalk = 200000
+var maxWalk = 200000
+
+var errTooMany = &apiError{http.StatusBadRequest, zfsapi.CodeBadRequest, "too many objects at once; use a longer prefix"}
+
+// walk collects objects from a snapshot, honouring cancellation and
+// maxWalk. Files whose keys would be too long to be objects are skipped
+// and counted.
+type walk struct {
+	ctx     context.Context
+	log     *slog.Logger
+	objs    []zfsapi.Object
+	skipped int
+}
+
+func (w *walk) add(o zfsapi.Object) error {
+	if len(w.objs) >= maxWalk {
+		return errTooMany
+	}
+	w.objs = append(w.objs, o)
+	return nil
+}
+
+// skip reports whether key is too long to be an object, logging it.
+func (w *walk) skip(key string) bool {
+	if len(key) <= maxKeyLen {
+		return false
+	}
+	w.skipped++
+	w.log.Warn("skipping a path too long to be an object", "path", key[:64]+"…", "length", len(key))
+	return true
+}
+
+// dir walks the directory name in dirfd, whose key prefix is keyPrefix. A
+// directory carrying the gateway's etag xattr is a folder object in its
+// own right.
+func (w *walk) dir(dirfd int, name, keyPrefix string) error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	if w.skip(keyPrefix) {
+		return nil
+	}
+	fd, err := openDirAt(dirfd, []string{name}, nil)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	if _, err := fgetxattr(fd, "user.etag"); err == nil {
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil {
+			return err
+		}
+		o := objectOf(keyPrefix, st)
+		o.Size = 0
+		if err := w.add(o); err != nil {
+			return err
+		}
+	}
+	ents, err := readDirAt(fd)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if err := w.entry(fd, e, keyPrefix+e.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// entry adds one directory entry, recursing into directories.
+func (w *walk) entry(dirfd int, e dirEntry, key string) error {
+	switch {
+	case e.isDir():
+		return w.dir(dirfd, e.name, key+"/")
+	case e.isRegular():
+		if w.skip(key) {
+			return nil
+		}
+		return w.add(objectOf(key, e.st))
+	}
+	return nil
+}
 
 func (s *Server) listSnapshotObjects(w http.ResponseWriter, r *http.Request) error {
 	q := r.URL.Query()
@@ -535,7 +711,12 @@ func (s *Server) listSnapshotObjects(w http.ResponseWriter, r *http.Request) err
 	if len(prefix) > maxKeyLen || strings.ContainsRune(prefix, 0) || strings.HasPrefix(prefix, "/") {
 		return badRequest("bad prefix")
 	}
-	root, _, err := s.snapRoot(r)
+	b, err := s.dataset(r)
+	if err != nil {
+		return err
+	}
+	defer b.close()
+	root, err := s.snapRoot(r, b)
 	if err != nil {
 		return err
 	}
@@ -551,7 +732,7 @@ func (s *Server) listSnapshotObjects(w http.ResponseWriter, r *http.Request) err
 	}
 	out := zfsapi.ObjectList{Objects: []zfsapi.Object{}, Prefixes: []string{}}
 	dirfd, err := openDirAt(root, parts, nil)
-	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) {
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, errSymlink) {
 		writeJSON(w, http.StatusOK, out)
 		return nil
 	}
@@ -560,39 +741,36 @@ func (s *Server) listSnapshotObjects(w http.ResponseWriter, r *http.Request) err
 	}
 	defer syscall.Close(dirfd)
 
-	// Every key or common prefix, then sorted and paged.
-	type item struct {
-		key    string
-		prefix bool
-		obj    zfsapi.Object
-	}
-	var items []item
 	ents, err := readDirAt(dirfd)
 	if err != nil {
 		return err
 	}
+	var prefixes []string
+	wk := &walk{ctx: r.Context(), log: s.Log}
 	for _, e := range ents {
 		if (dirPart == "" && internal(e.name)) || !strings.HasPrefix(e.name, namePart) {
 			continue
 		}
 		key := dirPart + e.name
-		switch {
-		case e.isDir() && delimiter == "/":
-			items = append(items, item{key: key + "/", prefix: true})
-		case e.isDir():
-			var objs []zfsapi.Object
-			if err := walkObjects(dirfd, e.name, key+"/", &objs); err != nil {
-				return err
-			}
-			for _, o := range objs {
-				items = append(items, item{key: o.Key, obj: o})
-			}
-		case e.isRegular():
-			items = append(items, item{key: key, obj: objectOf(key, e.st)})
+		if e.isDir() && delimiter == "/" {
+			prefixes = append(prefixes, key+"/")
+			continue
 		}
-		if len(items) > maxWalk {
-			return badRequest("too many objects to list at once; use a longer prefix or a delimiter")
+		if err := wk.entry(dirfd, e, key); err != nil {
+			return err
 		}
+	}
+	type item struct {
+		key    string
+		prefix bool
+		obj    zfsapi.Object
+	}
+	items := make([]item, 0, len(prefixes)+len(wk.objs))
+	for _, p := range prefixes {
+		items = append(items, item{key: p, prefix: true})
+	}
+	for _, o := range wk.objs {
+		items = append(items, item{key: o.Key, obj: o})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].key < items[j].key })
 	for _, it := range items {
@@ -628,57 +806,24 @@ func objectOf(key string, st syscall.Stat_t) zfsapi.Object {
 	return zfsapi.Object{Key: key, Size: st.Size, Modified: time.Unix(st.Mtim.Unix()).UTC()}
 }
 
-// walkObjects lists every object under the directory name in dirfd, whose
-// key prefix is keyPrefix. A directory carrying the gateway's etag xattr
-// is a folder object in its own right.
-func walkObjects(dirfd int, name, keyPrefix string, out *[]zfsapi.Object) error {
-	fd, err := openDirAt(dirfd, []string{name}, nil)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(fd)
-	if _, err := fgetxattr(fd, "user.etag"); err == nil {
-		var st syscall.Stat_t
-		if err := syscall.Fstat(fd, &st); err != nil {
-			return err
-		}
-		o := objectOf(keyPrefix, st)
-		o.Size = 0
-		*out = append(*out, o)
-	}
-	ents, err := readDirAt(fd)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if len(*out) > maxWalk {
-			return badRequest("too many objects to list at once; use a longer prefix")
-		}
-		switch {
-		case e.isDir():
-			if err := walkObjects(fd, e.name, keyPrefix+e.name+"/", out); err != nil {
-				return err
-			}
-		case e.isRegular():
-			*out = append(*out, objectOf(keyPrefix+e.name, e.st))
-		}
-	}
-	return nil
-}
-
 func (s *Server) getSnapshotObject(w http.ResponseWriter, r *http.Request) error {
 	parts, dir, err := splitKey(r.URL.Query().Get("key"))
 	if err != nil || dir {
 		return badRequest("bad key")
 	}
-	root, _, err := s.snapRoot(r)
+	if internal(parts[0]) {
+		return notFound("no such object")
+	}
+	b, err := s.dataset(r)
+	if err != nil {
+		return err
+	}
+	defer b.close()
+	root, err := s.snapRoot(r, b)
 	if err != nil {
 		return err
 	}
 	defer syscall.Close(root)
-	if internal(parts[0]) {
-		return notFound("no such object")
-	}
 	f, err := openFileAt(root, parts)
 	if errors.Is(err, syscall.ENOENT) {
 		return notFound("no such object")
@@ -700,12 +845,14 @@ func (s *Server) getSnapshotObject(w http.ResponseWriter, r *http.Request) error
 	return nil
 }
 
-// restore copies an object, or everything under a prefix, from a snapshot
-// back into the live bucket, overwriting what's there. Objects only in
-// the live bucket are left alone. Each file is written beside its target
-// and renamed into place, with the snapshot's owner, mode, times and
-// xattrs (the gateway's etag and content type among them).
-func (s *Server) restore(w http.ResponseWriter, r *http.Request) error {
+// restoreHandler copies an object, or everything under a prefix, from a
+// snapshot back into the live bucket, overwriting what's there. Objects
+// only in the live bucket are left alone. Each file is written beside its
+// target and renamed into place, with the snapshot's owner, permission
+// bits, times and xattrs (the gateway's etag and content type among
+// them). Only this bucket is locked meanwhile, at most MaxRestores run at
+// once, and a cancelled request stops between files.
+func (s *Server) restoreHandler(w http.ResponseWriter, r *http.Request) error {
 	var req zfsapi.Restore
 	if err := readJSON(r, &req); err != nil {
 		return err
@@ -713,20 +860,29 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) error {
 	if (req.Key != "") == (req.Prefix != "" || req.All) {
 		return badRequest("give a key, or a prefix (or all for the whole bucket)")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	root, dir, err := s.snapRoot(r)
+	name, _, _, err := s.bucketName(r)
+	if err != nil {
+		return err
+	}
+	ctx := r.Context()
+	release, err := acquire(ctx, s.restore)
+	if err != nil {
+		return err
+	}
+	defer release()
+	defer s.lock(name)()
+	b, err := s.dataset(r)
+	if err != nil {
+		return err
+	}
+	defer b.close()
+	root, err := s.snapRoot(r, b)
 	if err != nil {
 		return err
 	}
 	defer syscall.Close(root)
-	live, err := openRoot(dir)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(live)
 
-	n := 0
+	res := zfsapi.Restored{}
 	if req.Key != "" {
 		parts, isDir, err := splitKey(req.Key)
 		if err != nil {
@@ -735,13 +891,13 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) error {
 		if internal(parts[0]) {
 			return notFound("no such object")
 		}
-		if err := restoreOne(root, live, parts, isDir); err != nil {
+		if err := restoreOne(root, b.fd, parts, isDir); err != nil {
 			if errors.Is(err, syscall.ENOENT) {
 				return notFound("no such object in the snapshot")
 			}
 			return err
 		}
-		n = 1
+		res.Objects = 1
 	} else {
 		parts, err := splitPrefix(req.Prefix)
 		if err != nil {
@@ -750,33 +906,26 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) error {
 		if len(parts) > 0 && internal(parts[0]) {
 			return notFound("no such folder")
 		}
-		var objs []zfsapi.Object
+		wk := &walk{ctx: ctx, log: s.Log}
 		if len(parts) == 0 {
 			ents, err := readDirAt(root)
 			if err != nil {
 				return err
 			}
 			for _, e := range ents {
-				switch {
-				case internal(e.name):
-				case e.isDir():
-					if err := walkObjects(root, e.name, e.name+"/", &objs); err != nil {
-						return err
-					}
-				case e.isRegular():
-					objs = append(objs, zfsapi.Object{Key: e.name})
+				if internal(e.name) {
+					continue
+				}
+				if err := wk.entry(root, e, e.name); err != nil {
+					return err
 				}
 			}
 		} else {
 			parent, err := openDirAt(root, parts[:len(parts)-1], nil)
-			if err != nil {
-				if errors.Is(err, syscall.ENOENT) {
-					return notFound("no such folder in the snapshot")
-				}
-				return err
+			if err == nil {
+				err = wk.dir(parent, parts[len(parts)-1], req.Prefix)
+				syscall.Close(parent)
 			}
-			err = walkObjects(parent, parts[len(parts)-1], req.Prefix, &objs)
-			syscall.Close(parent)
 			if errors.Is(err, syscall.ENOENT) {
 				return notFound("no such folder in the snapshot")
 			}
@@ -784,19 +933,26 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		}
-		for _, o := range objs {
-			p, isDir, err := splitKey(o.Key)
-			if err != nil {
+		res.Skipped = wk.skipped
+		for _, o := range wk.objs {
+			if err := ctx.Err(); err != nil {
+				s.Log.Warn("restore cancelled", "bucket", name, "restored", res.Objects, "of", len(wk.objs))
 				return err
 			}
-			if err := restoreOne(root, live, p, isDir); err != nil {
-				return fmt.Errorf("restore %s: %w", o.Key, err)
+			p, isDir, err := splitKey(o.Key)
+			if err != nil {
+				res.Skipped++
+				s.Log.Warn("skipping an unusable key", "key", o.Key, "err", err)
+				continue
 			}
-			n++
+			if err := restoreOne(root, b.fd, p, isDir); err != nil {
+				return fmt.Errorf("restore %s (after %d objects): %w", o.Key, res.Objects, err)
+			}
+			res.Objects++
 		}
 	}
-	s.Log.Info("restored from snapshot", "path", r.URL.Path, "key", req.Key, "prefix", req.Prefix, "all", req.All, "objects", n)
-	writeJSON(w, http.StatusOK, zfsapi.Restored{Objects: n})
+	s.Log.Info("restored from snapshot", "path", r.URL.Path, "key", req.Key, "prefix", req.Prefix, "all", req.All, "objects", res.Objects, "skipped", res.Skipped)
+	writeJSON(w, http.StatusOK, res)
 	return nil
 }
 

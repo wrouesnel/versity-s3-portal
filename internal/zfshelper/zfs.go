@@ -3,7 +3,6 @@ package zfshelper
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -38,20 +37,26 @@ func isNoDataset(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "does not exist")
 }
 
-// mountpoint returns ds's mountpoint, or exists false.
-func (s *Server) mountpoint(ctx context.Context, ds string) (mp string, exists bool, err error) {
-	out, err := s.run(ctx, "list", "-H", "-o", "name,mountpoint", ds)
+// dsState is what zfs says about a dataset.
+type dsState struct {
+	exists     bool
+	mountpoint string
+	mounted    bool
+}
+
+func (s *Server) state(ctx context.Context, ds string) (dsState, error) {
+	out, err := s.run(ctx, "list", "-H", "-o", "name,mountpoint,mounted", ds)
 	if isNoDataset(err) {
-		return "", false, nil
+		return dsState{}, nil
 	}
 	if err != nil {
-		return "", false, err
+		return dsState{}, err
 	}
-	fields := strings.Split(strings.TrimSpace(string(out)), "\t")
-	if len(fields) != 2 || fields[0] != ds {
-		return "", false, fmt.Errorf("unexpected zfs list output %q", out)
+	f := strings.Split(strings.TrimSpace(string(out)), "\t")
+	if len(f) != 3 || f[0] != ds {
+		return dsState{}, fmt.Errorf("unexpected zfs list output %q", out)
 	}
-	return fields[1], true, nil
+	return dsState{exists: true, mountpoint: f[1], mounted: f[2] == "yes"}, nil
 }
 
 func (s *Server) info(ctx context.Context, ds string) (*zfsapi.BucketInfo, error) {
@@ -107,8 +112,18 @@ func (s *Server) setBackup(ctx context.Context, ds string, include bool) error {
 	return err
 }
 
-// snapshots lists ds's portal snapshots, newest first.
-func (s *Server) snapshots(ctx context.Context, ds string) ([]zfsapi.Snapshot, error) {
+func (s *Server) setReadonly(ctx context.Context, ds string, on bool) error {
+	var err error
+	if on {
+		_, err = s.run(ctx, "set", "readonly=on", ds)
+	} else {
+		_, err = s.run(ctx, "inherit", "readonly", ds)
+	}
+	return err
+}
+
+// allSnapshots lists every snapshot of ds, ours or not.
+func (s *Server) allSnapshots(ctx context.Context, ds string) ([]zfsapi.Snapshot, error) {
 	out, err := s.run(ctx, "list", "-H", "-p", "-t", "snapshot", "-d", "1", "-o", "name,creation,used", ds)
 	if err != nil {
 		return nil, err
@@ -120,12 +135,27 @@ func (s *Server) snapshots(ctx context.Context, ds string) ([]zfsapi.Snapshot, e
 			continue
 		}
 		owner, name, ok := strings.Cut(f[0], "@")
-		if !ok || owner != ds || !zfsapi.SnapshotName.MatchString(name) {
+		if !ok || owner != ds {
 			continue
 		}
 		created, _ := strconv.ParseInt(f[1], 10, 64)
 		used, _ := strconv.ParseInt(f[2], 10, 64)
 		snaps = append(snaps, zfsapi.Snapshot{Name: name, Created: time.Unix(created, 0).UTC(), Used: used})
+	}
+	return snaps, nil
+}
+
+// snapshots lists ds's portal snapshots, newest first.
+func (s *Server) snapshots(ctx context.Context, ds string) ([]zfsapi.Snapshot, error) {
+	all, err := s.allSnapshots(ctx, ds)
+	if err != nil {
+		return nil, err
+	}
+	snaps := []zfsapi.Snapshot{}
+	for _, sn := range all {
+		if zfsapi.SnapshotName.MatchString(sn.Name) {
+			snaps = append(snaps, sn)
+		}
 	}
 	sort.Slice(snaps, func(i, j int) bool {
 		if !snaps[i].Created.Equal(snaps[j].Created) {
@@ -148,5 +178,3 @@ func (s *Server) hasSnapshot(ctx context.Context, ds, name string) (bool, error)
 	}
 	return false, nil
 }
-
-var errNotDataset = errors.New("not a dataset")

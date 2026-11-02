@@ -39,6 +39,11 @@ const (
 	CodeNotDataset = "NotDataset"
 	CodeConflict   = "Conflict"
 	CodeInternal   = "Internal"
+	// CodeHasHostSnapshots: the bucket can't be destroyed, since that would
+	// also destroy snapshots that aren't the portal's (the host's).
+	CodeHasHostSnapshots = "HasHostSnapshots"
+	// CodeBusy: too many requests are already being served.
+	CodeBusy = "Busy"
 )
 
 // BucketInfo is GET /buckets/{b}.
@@ -108,4 +113,7 @@ type Restore struct {
 // Restored is the reply to a restore.
 type Restored struct {
 	Objects int `json:"objects"`
+	// Skipped counts files a prefix or whole-bucket restore left out
+	// because their keys are too long to be objects.
+	Skipped int `json:"skipped,omitempty"`
 }

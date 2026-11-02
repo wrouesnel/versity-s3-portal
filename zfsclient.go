@@ -22,6 +22,7 @@ type (
 	ZFSSnapshot       = zfsapi.Snapshot
 	ZFSObject         = zfsapi.Object
 	ZFSSnapshotObject = zfsapi.ObjectList
+	ZFSRestored       = zfsapi.Restored
 )
 
 // ZFSHelper talks to s3-zfs-helper, which keeps each bucket in its own ZFS
@@ -51,6 +52,13 @@ var (
 	ErrZFSNotDataset = errors.New("bucket isn't a dataset")
 	// ErrZFSNotFound: no such bucket, snapshot or object.
 	ErrZFSNotFound = errors.New("not found")
+	// ErrZFSHasHostSnapshots: the bucket can't be deleted while it has
+	// snapshots other than the portal's (the host's weekly ones), since
+	// they'd go with it. They have to be removed on the host.
+	ErrZFSHasHostSnapshots = errors.New("bucket has host snapshots")
+	// ErrZFSBusy: the helper is serving as many requests as it will;
+	// try again shortly.
+	ErrZFSBusy = errors.New("zfs helper busy")
 )
 
 func (e *ZFSError) Is(target error) bool {
@@ -61,6 +69,10 @@ func (e *ZFSError) Is(target error) bool {
 		return e.Code == zfsapi.CodeNotDataset
 	case ErrZFSNotFound:
 		return e.Code == zfsapi.CodeNotFound
+	case ErrZFSHasHostSnapshots:
+		return e.Code == zfsapi.CodeHasHostSnapshots
+	case ErrZFSBusy:
+		return e.Code == zfsapi.CodeBusy
 	}
 	return false
 }
@@ -228,19 +240,20 @@ func (z *ZFSHelper) RestoreObject(ctx context.Context, bucket, snapshot, key str
 }
 
 // RestorePrefix copies everything under prefix (a folder, ending in "/")
-// from a snapshot over the live bucket, and returns how many objects.
-// Objects only in the live bucket stay.
-func (z *ZFSHelper) RestorePrefix(ctx context.Context, bucket, snapshot, prefix string) (int, error) {
+// from a snapshot over the live bucket, and says how many objects it
+// restored, and skipped for having keys too long to be objects. Objects
+// only in the live bucket stay.
+func (z *ZFSHelper) RestorePrefix(ctx context.Context, bucket, snapshot, prefix string) (ZFSRestored, error) {
 	return z.restore(ctx, bucket, snapshot, zfsapi.Restore{Prefix: prefix})
 }
 
 // RestoreAll copies the whole snapshot over the live bucket.
-func (z *ZFSHelper) RestoreAll(ctx context.Context, bucket, snapshot string) (int, error) {
+func (z *ZFSHelper) RestoreAll(ctx context.Context, bucket, snapshot string) (ZFSRestored, error) {
 	return z.restore(ctx, bucket, snapshot, zfsapi.Restore{All: true})
 }
 
-func (z *ZFSHelper) restore(ctx context.Context, bucket, snapshot string, req zfsapi.Restore) (int, error) {
-	var out zfsapi.Restored
+func (z *ZFSHelper) restore(ctx context.Context, bucket, snapshot string, req zfsapi.Restore) (ZFSRestored, error) {
+	var out ZFSRestored
 	err := z.call(ctx, http.MethodPost, zfsPath(bucket, "snapshots", snapshot, "restore"), nil, req, &out)
-	return out.Objects, err
+	return out, err
 }
