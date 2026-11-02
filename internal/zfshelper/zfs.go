@@ -113,11 +113,50 @@ func (s *Server) setBackup(ctx context.Context, ds string, include bool) error {
 }
 
 func (s *Server) setReadonly(ctx context.Context, ds string, on bool) error {
-	var err error
 	if on {
-		_, err = s.run(ctx, "set", "readonly=on", ds)
-	} else {
-		_, err = s.run(ctx, "inherit", "readonly", ds)
+		return s.setProp(ctx, ds, "readonly", "on")
+	}
+	return s.inheritProp(ctx, ds, "readonly")
+}
+
+// getProp returns a property's value and its source (local, default,
+// inherited from ...).
+func (s *Server) getProp(ctx context.Context, ds, prop string) (value, source string, err error) {
+	out, err := s.run(ctx, "get", "-H", "-o", "value,source", prop, ds)
+	if err != nil {
+		return "", "", err
+	}
+	value, source, ok := strings.Cut(strings.TrimRight(string(out), "\n"), "\t")
+	if !ok {
+		return "", "", fmt.Errorf("unexpected zfs get output %q", out)
+	}
+	return value, source, nil
+}
+
+// setProp sets a property. The helper's user can change readonly and
+// canmount, but zfs then tries to remount the dataset, can't, and exits
+// with an error though the change was made (and the kernel applies
+// readonly to the live mount at once). So when zfs fails, the property
+// is read back, and if it's as asked that's success.
+func (s *Server) setProp(ctx context.Context, ds, prop, val string) error {
+	_, err := s.run(ctx, "set", prop+"="+val, ds)
+	if err == nil {
+		return nil
+	}
+	if v, src, gerr := s.getProp(ctx, ds, prop); gerr == nil && v == val && src == "local" {
+		return nil
+	}
+	return err
+}
+
+// inheritProp clears a property, as setProp sets one.
+func (s *Server) inheritProp(ctx context.Context, ds, prop string) error {
+	_, err := s.run(ctx, "inherit", prop, ds)
+	if err == nil {
+		return nil
+	}
+	if _, src, gerr := s.getProp(ctx, ds, prop); gerr == nil && src != "local" {
+		return nil
 	}
 	return err
 }

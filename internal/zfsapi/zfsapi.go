@@ -137,3 +137,16 @@ type Restored struct {
 	// because their keys are too long to be objects.
 	Skipped int `json:"skipped,omitempty"`
 }
+
+// The mounter's places: where s3-zfs-mounter mounts a bucket's dataset.
+// It computes the directory itself, from its own configuration.
+const (
+	// PlaceBucket is the bucket's directory, where the gateway sees it.
+	PlaceBucket = "bucket"
+	// PlaceStaging is a directory in the staging area, where a new
+	// dataset is set up before it takes the bucket's place.
+	PlaceStaging = "staging"
+)
+
+// ValidPlace says whether p is one of the Place* constants.
+func ValidPlace(p string) bool { return p == PlaceBucket || p == PlaceStaging }

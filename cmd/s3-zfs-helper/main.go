@@ -1,8 +1,10 @@
 // s3-zfs-helper keeps each of the S3 gateway's buckets in its own ZFS
 // dataset, for s3-key-portal: it adopts new buckets as datasets, sets
 // quotas and the backup flag, and takes, lists, browses and restores from
-// snapshots. It runs as root on the host and serves a small JSON API on a
-// unix socket, either passed in by systemd socket activation or made with
+// snapshots. It runs on the host as its own unprivileged user, with ZFS
+// permissions delegated over the buckets and the trash, and asks
+// s3-zfs-mounter to do its mounting. It serves a small JSON API on a unix
+// socket, either passed in by systemd socket activation or made with
 // -socket. See docs/zfs-helper.md.
 package main
 
@@ -34,8 +36,9 @@ func run() error {
 	parent := flag.String("parent", "storage/s3/buckets", "dataset whose children are buckets")
 	root := flag.String("root", "/storage/s3/buckets", "where the parent dataset is mounted")
 	trash := flag.String("trash", "storage/s3/trash", "dataset deleted buckets are moved under, in the same pool and outside -parent (canmount=off, mountpoint=none)")
-	staging := flag.String("staging", "", "root-only directory outside -root where new datasets are set up (default: .s3-zfs-staging beside -root)")
-	stateDir := flag.String("state-dir", "/var/lib/s3-zfs-helper", "root-only directory for metadata saved while adopting a bucket")
+	staging := flag.String("staging", "", "the mounter's staging directory, outside -root (default: .s3-zfs-staging beside -root)")
+	stateDir := flag.String("state-dir", "/var/lib/s3-zfs-helper", "directory, owned by the helper's user, for metadata saved while adopting a bucket")
+	mounter := flag.String("mounter", "/run/s3-zfs-mounter/socket", "s3-zfs-mounter's socket")
 	zfsPath := flag.String("zfs", "/usr/sbin/zfs", "the zfs command")
 	socket := flag.String("socket", "", "unix socket to listen on, when not socket-activated")
 	group := flag.Int("socket-group", -1, "gid to own -socket, which is made mode 0660")
@@ -43,7 +46,7 @@ func run() error {
 
 	srv := zfshelper.New(zfshelper.Config{
 		Parent: *parent, Root: *root, Trash: *trash, Staging: *staging, StateDir: *stateDir,
-		Run: zfshelper.ExecRunner(*zfsPath),
+		Run: zfshelper.ExecRunner(*zfsPath), Mount: zfshelper.NewMountClient(*mounter),
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

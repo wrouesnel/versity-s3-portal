@@ -21,14 +21,19 @@ import (
 //
 //  1. check the directory holds nothing but the gateway's empty temporary
 //     directories, and save its metadata to StateDir, synced to disk;
-//  2. create the dataset mounted in Staging, a root-only directory outside
-//     the buckets tree, and set it up there, so it's never visible half
-//     done;
-//  3. remove the directory and move the dataset's mountpoint onto it;
+//  2. create the dataset unmounted, with canmount=noauto so nothing mounts
+//     it behind our back, have the mounter mount it in Staging, a root-only
+//     directory outside the buckets tree, set it up there, and have the
+//     mounter unmount it, so it's never visible half done;
+//  3. remove the directory and have the mounter mount the dataset in its
+//     place, then set canmount=on so the host mounts it at boot (at its
+//     inherited mountpoint, which is the same place);
 //  4. delete the saved metadata.
 //
-// If a step fails, what was done is undone. If the helper dies part way,
-// Recover (run at startup) finishes or undoes it from the saved metadata.
+// The helper never sets a mountpoint: its user isn't allowed to, so a
+// bucket can't be made to mount over anything else at boot. If a step
+// fails, what was done is undone. If the helper dies part way, Recover
+// (run at startup) finishes or undoes it from the saved metadata.
 
 // adoptState is what's saved in StateDir while a bucket is being adopted.
 type adoptState struct {
@@ -140,27 +145,28 @@ func (s *Server) adoptNew(ctx context.Context, name, ds, dir string) (bool, erro
 		return false, fmt.Errorf("save the bucket directory's metadata: %w", err)
 	}
 
-	stage := filepath.Join(s.Staging, name)
-	if err := syscall.Rmdir(stage); err != nil && !errors.Is(err, syscall.ENOENT) {
-		s.dropState(name)
-		return false, fmt.Errorf("clear staging mountpoint: %w", err)
-	}
 	// undo destroys the new dataset; the directory is still in place.
 	undo := func(why error) (bool, error) {
+		if err := s.Mount.Unmount(ctx, zfsapi.PlaceStaging, name); err != nil {
+			s.Log.Error("couldn't unmount a half-adopted dataset from staging; Recover will retry at startup", "dataset", ds, "err", err)
+			return false, why
+		}
 		if st, err := s.state(ctx, ds); err == nil && st.exists {
 			if _, err := s.run(ctx, "destroy", ds); err != nil {
 				s.Log.Error("couldn't destroy half-adopted dataset; Recover will retry at startup", "dataset", ds, "err", err)
 				return false, why
 			}
 		}
-		syscall.Rmdir(stage)
 		s.dropState(name)
 		return false, why
 	}
-	if _, err := s.run(ctx, "create", "-o", "mountpoint="+stage, ds); err != nil {
-		// It may have been created but failed to mount.
+	if _, err := s.run(ctx, "create", "-u", "-o", "canmount=noauto", ds); err != nil {
 		return undo(err)
 	}
+	if err := s.Mount.Mount(ctx, zfsapi.PlaceStaging, name); err != nil {
+		return undo(err)
+	}
+	stage := filepath.Join(s.Staging, name)
 	sfd, err := s.openMounted(stage, s.Staging)
 	if err == nil {
 		err = m.apply(sfd, true)
@@ -168,6 +174,9 @@ func (s *Server) adoptNew(ctx context.Context, name, ds, dir string) (bool, erro
 	}
 	if err != nil {
 		return undo(fmt.Errorf("set up the new dataset: %w", err))
+	}
+	if err := s.Mount.Unmount(ctx, zfsapi.PlaceStaging, name); err != nil {
+		return undo(err)
 	}
 
 	// Check again (the gateway may have written meanwhile), and clear the
@@ -183,7 +192,8 @@ func (s *Server) adoptNew(ctx context.Context, name, ds, dir string) (bool, erro
 	if err != nil {
 		return undo(err)
 	}
-	if _, err := s.run(ctx, "set", "mountpoint="+dir, ds); err != nil {
+	if err := s.Mount.Mount(ctx, zfsapi.PlaceBucket, name); err != nil {
+		s.Mount.Unmount(ctx, zfsapi.PlaceBucket, name)
 		if perr := s.putBack(dir, m); perr != nil {
 			s.Log.Error("couldn't put the bucket directory back; Recover will retry at startup", "bucket", name, "err", perr)
 			return false, err
@@ -196,10 +206,20 @@ func (s *Server) adoptNew(ctx context.Context, name, ds, dir string) (bool, erro
 		return false, err
 	}
 	b.close()
-	syscall.Rmdir(stage)
+	s.mountAtBoot(ctx, name, ds)
 	s.dropState(name)
 	s.Log.Info("adopted bucket", "bucket", name, "dataset", ds)
 	return true, nil
+}
+
+// mountAtBoot sets canmount=on on a bucket mounted in its place, so the
+// host mounts it at boot. If that fails the bucket still works until the
+// host restarts, so it's logged rather than undone; Check tries again at
+// startup.
+func (s *Server) mountAtBoot(ctx context.Context, name, ds string) {
+	if err := s.setProp(ctx, ds, "canmount", "on"); err != nil {
+		s.Log.Error("couldn't set canmount=on; the bucket won't be mounted after a reboot until the helper restarts", "bucket", name, "err", err)
+	}
 }
 
 // putBack recreates a bucket directory with its saved metadata.
@@ -245,10 +265,13 @@ func (s *Server) recoverOne(ctx context.Context, bucket string) error {
 		return fmt.Errorf("unreadable state file %s", s.statePath(bucket))
 	}
 	ds, dir := s.Parent+"/"+bucket, s.Root+"/"+bucket
+	if err := s.Mount.Unmount(ctx, zfsapi.PlaceStaging, bucket); err != nil {
+		return err
+	}
 	if b, err := s.openDataset(ctx, bucket, ds, dir); err == nil {
 		b.close()
+		s.mountAtBoot(ctx, bucket, ds)
 		s.Log.Info("finished an interrupted adoption", "bucket", bucket)
-		syscall.Rmdir(filepath.Join(s.Staging, bucket))
 		s.dropState(bucket)
 		return nil
 	}
@@ -257,11 +280,15 @@ func (s *Server) recoverOne(ctx context.Context, bucket string) error {
 		return err
 	}
 	if dsState.exists {
+		// It may be mounted at the bucket's directory but not usable;
+		// the mounter only unmounts it if it's that dataset.
+		if err := s.Mount.Unmount(ctx, zfsapi.PlaceBucket, bucket); err != nil {
+			return err
+		}
 		if _, err := s.run(ctx, "destroy", ds); err != nil {
 			return fmt.Errorf("destroy %s: %w", ds, err)
 		}
 	}
-	syscall.Rmdir(filepath.Join(s.Staging, bucket))
 	if err := s.putBack(dir, st.Meta); err != nil {
 		return fmt.Errorf("put back %s: %w", dir, err)
 	}

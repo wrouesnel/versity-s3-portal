@@ -32,9 +32,11 @@ func TestZFSAgainstGateway(t *testing.T) {
 	fake.AddUnmounted("storage/s3/trash")
 	clock := time.Now().UTC()
 	fake.Now = func() time.Time { return clock }
+	staging := filepath.Join(filepath.Dir(data), ".s3-zfs-staging")
 	helper := zfshelper.New(zfshelper.Config{
 		Parent: "storage/s3/buckets", Root: data, Run: fake.Run, Now: func() time.Time { return clock },
-		Staging: filepath.Join(filepath.Dir(data), ".s3-zfs-staging"), StateDir: t.TempDir(), Trash: "storage/s3/trash",
+		Mount:   fake.Mounter("storage/s3/buckets", data, staging),
+		Staging: staging, StateDir: t.TempDir(), Trash: "storage/s3/trash",
 		// The fake's datasets are directories on the same filesystem.
 		SkipMountCheck: true,
 	})

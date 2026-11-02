@@ -28,8 +28,9 @@ func TestZFSHelperClient(t *testing.T) {
 	srv := zfshelper.New(zfshelper.Config{
 		Parent: "storage/s3/buckets", Root: root, Run: fake.Run, Now: func() time.Time { return clock },
 		Staging: filepath.Join(dir, "staging"), StateDir: filepath.Join(dir, "state"), SkipMountCheck: true,
-		Trash: "storage/s3/trash",
+		Trash: "storage/s3/trash", Mount: fake.Mounter("storage/s3/buckets", root, filepath.Join(dir, "staging")),
 	})
+	os.Mkdir(filepath.Join(dir, "staging"), 0o700)
 	fake.AddUnmounted("storage/s3/trash")
 	if err := srv.Check(ctx); err != nil {
 		t.Fatal(err)

@@ -102,36 +102,32 @@ func (s *Server) destroy(w http.ResponseWriter, r *http.Request) error {
 
 	entry := name + "-" + s.Now().UTC().Format(zfsapi.SnapshotTimeFormat)
 	target := s.Trash + "/" + entry
-	if _, err := s.run(ctx, "unmount", b.ds); err != nil {
+	if err := s.Mount.Unmount(ctx, zfsapi.PlaceBucket, name); err != nil {
 		writable()
-		return fmt.Errorf("unmount %s (is something using it?): %w", name, err)
+		return err
 	}
 	remount := func() {
-		if _, err := s.run(ctx, "mount", b.ds); err != nil {
+		writable()
+		if err := s.setProp(ctx, b.ds, "canmount", "on"); err != nil {
+			s.Log.Error("couldn't reset canmount", "bucket", name, "err", err)
+		}
+		if err := s.Mount.Mount(ctx, zfsapi.PlaceBucket, name); err != nil {
 			s.Log.Error("couldn't mount the bucket again", "bucket", name, "err", err)
 		}
-		writable()
 	}
-	if _, err := s.run(ctx, "set", "canmount=off", b.ds); err != nil {
+	if err := s.setProp(ctx, b.ds, "canmount", "off"); err != nil {
 		remount()
 		return err
 	}
-	if _, err := s.run(ctx, "rename", b.ds, target); err != nil {
-		if _, err := s.run(ctx, "inherit", "canmount", b.ds); err != nil {
-			s.Log.Error("couldn't reset canmount", "bucket", name, "err", err)
-		}
+	if _, err := s.run(ctx, "rename", "-u", b.ds, target); err != nil {
 		remount()
 		if strings.Contains(err.Error(), "exists") {
 			return &apiError{http.StatusConflict, zfsapi.CodeConflict, "that bucket was deleted moments ago already; try again in a second"}
 		}
 		return err
 	}
-	// In the trash it inherits mountpoint=none; it can't be mounted anyway.
-	if _, err := s.run(ctx, "inherit", "mountpoint", target); err != nil {
-		s.Log.Warn("couldn't clear the trashed bucket's mountpoint", "entry", entry, "err", err)
-	}
-	// The empty directory it was mounted on would look like a bucket to the
-	// gateway.
+	// The mounter removed the directory it was mounted on, which would
+	// otherwise look like a bucket to the gateway.
 	if err := syscall.Rmdir(b.dir); err != nil && !errors.Is(err, syscall.ENOENT) {
 		return fmt.Errorf("moved %s to the trash as %s, but couldn't remove its directory: %w", name, entry, err)
 	}
@@ -266,37 +262,37 @@ func (s *Server) restoreTrash(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	if _, err := s.run(ctx, "rename", src, ds); err != nil {
+	if _, err := s.run(ctx, "rename", "-u", src, ds); err != nil {
 		return err
 	}
 	// putBack returns it to the trash, as it was, if it can't be mounted.
 	putBack := func(why error) error {
-		s.run(ctx, "unmount", ds)
-		s.run(ctx, "set", "canmount=off", ds)
-		s.run(ctx, "set", "readonly=on", ds)
-		if _, err := s.run(ctx, "rename", ds, src); err != nil {
-			s.Log.Error("couldn't return a bucket to the trash after a failed restore", "dataset", ds, "err", err)
-		} else {
-			s.run(ctx, "inherit", "mountpoint", src)
+		if err := s.Mount.Unmount(ctx, zfsapi.PlaceBucket, bucket); err != nil {
+			s.Log.Error("couldn't unmount a bucket after a failed restore", "dataset", ds, "err", err)
+			return why
 		}
-		syscall.Rmdir(dir)
+		s.setProp(ctx, ds, "canmount", "off")
+		s.setReadonly(ctx, ds, true)
+		if _, err := s.run(ctx, "rename", "-u", ds, src); err != nil {
+			s.Log.Error("couldn't return a bucket to the trash after a failed restore", "dataset", ds, "err", err)
+		}
 		return why
 	}
-	for _, args := range [][]string{
-		{"set", "mountpoint=" + dir, ds},
-		{"inherit", "canmount", ds},
-		{"inherit", "readonly", ds},
-		{"mount", ds},
-	} {
-		if _, err := s.run(ctx, args...); err != nil {
-			return putBack(err)
-		}
+	if err := s.setReadonly(ctx, ds, false); err != nil {
+		return putBack(err)
+	}
+	if err := s.setProp(ctx, ds, "canmount", "noauto"); err != nil {
+		return putBack(err)
+	}
+	if err := s.Mount.Mount(ctx, zfsapi.PlaceBucket, bucket); err != nil {
+		return putBack(err)
 	}
 	b, err := s.openDataset(ctx, bucket, ds, dir)
 	if err != nil {
 		return putBack(err)
 	}
 	b.close()
+	s.mountAtBoot(ctx, bucket, ds)
 	s.Log.Info("restored bucket from the trash", "entry", entry, "bucket", bucket)
 	writeJSON(w, http.StatusOK, map[string]string{"bucket": bucket, "dataset": ds})
 	return nil

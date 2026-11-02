@@ -3,7 +3,11 @@
 // dataset, with quotas, a backup flag and snapshots the portal can browse
 // and restore from.
 //
-// It runs as root on the host, so it trusts nothing it's sent: bucket and
+// It runs on the host as its own unprivileged user, with ZFS permissions
+// delegated (zfs allow) over the buckets and the trash only, and the file
+// capabilities it needs to carry owners and modes over. Mounting is left
+// to s3-zfs-mounter (MountServer), since only CAP_SYS_ADMIN can mount,
+// and with that ZFS checks nothing. It still trusts nothing it's sent: bucket and
 // snapshot names must match zfsapi's patterns, it only touches datasets
 // that are direct children of its parent dataset and really mounted where
 // they should be, and every path below a bucket is walked without
@@ -45,11 +49,14 @@ type Config struct {
 	// "trash" beside Parent.
 	Trash string
 	// Staging is a root-only (0700) directory on the same host, outside
-	// Root, where new datasets are first mounted and set up before they
-	// take a bucket's place. Default: .s3-zfs-staging beside Root.
+	// Root, where the mounter first mounts new datasets to be set up before
+	// they take a bucket's place. Default: .s3-zfs-staging beside Root.
 	Staging string
+	// Mount mounts and unmounts buckets' datasets.
+	Mount Mounter
 	// StateDir keeps a bucket directory's metadata while it's being
-	// adopted, so a crash can't lose it. Default /var/lib/s3-zfs-helper.
+	// adopted, so a crash can't lose it. It must be owned by the helper's
+	// user. Default /var/lib/s3-zfs-helper.
 	StateDir string
 	// Run runs zfs.
 	Run Runner
@@ -140,9 +147,12 @@ func (s *Server) run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // Check makes sure the parent dataset is mounted where Root says, sets up
-// the staging and state directories, and finishes or undoes any adoption
-// a crash interrupted.
+// the state directory, and finishes or undoes any adoption a crash
+// interrupted.
 func (s *Server) Check(ctx context.Context) error {
+	if s.Mount == nil {
+		return fmt.Errorf("no mounter")
+	}
 	st, err := s.state(ctx, s.Parent)
 	if err != nil {
 		return err
@@ -159,17 +169,15 @@ func (s *Server) Check(ctx context.Context) error {
 	if err := s.checkTrash(ctx); err != nil {
 		return err
 	}
-	for _, dir := range []string{s.Staging, s.StateDir} {
-		if err := rootOnlyDir(dir); err != nil {
-			return err
-		}
+	if err := ownDir(s.StateDir); err != nil {
+		return err
 	}
 	return s.Recover(ctx)
 }
 
-// rootOnlyDir makes dir if it's missing, and makes sure it's a directory
-// (not a link) only its owner can use.
-func rootOnlyDir(dir string) error {
+// ownDir makes dir if it's missing, and makes sure it's a directory (not
+// a link) owned by this process's user and only usable by it.
+func ownDir(dir string) error {
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}

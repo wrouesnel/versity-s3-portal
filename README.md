@@ -147,8 +147,10 @@ they pick.
     https://s3.example.com/api/users/alice/check
   ```
 - **ZFS** (optional, with `ZFS_HELPER_SOCKET`): every bucket is its own ZFS
-  dataset, managed by `s3-zfs-helper`, a small root service on the host
-  that the portal talks to over a unix socket (see
+  dataset, managed by `s3-zfs-helper`, a small unprivileged service on the
+  host with ZFS rights delegated over the buckets only, and
+  `s3-zfs-mounter`, which mounts for it without access to ZFS. The portal
+  talks to the helper over a unix socket (see
   [docs/zfs-helper.md](docs/zfs-helper.md)).
   - A new bucket is made by the gateway as usual, then moved, still empty,
     into its own dataset with the gateway's metadata (owner, ACL, policy

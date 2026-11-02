@@ -1,8 +1,14 @@
-// Package zfstest is a fake zfs command for testing s3-zfs-helper and its
-// client without ZFS. A mounted dataset's files are a plain directory at
-// its mountpoint; an unmounted one's are kept aside in a hidden directory
-// and move back when it's mounted. A snapshot is a copy of the dataset's
-// files under .zfs/snapshot/<name>.
+// Package zfstest is a fake zfs command, and a fake s3-zfs-mounter, for
+// testing s3-zfs-helper and its client without ZFS. A mounted dataset's
+// files are a plain directory where it's mounted; an unmounted one's are
+// kept aside in a hidden directory and move back when it's mounted. A
+// snapshot is a copy of the dataset's files under .zfs/snapshot/<name>.
+//
+// It answers as zfs does for the helper's unprivileged user with the
+// delegated grants in docs/zfs-helper.md: it can't mount or unmount,
+// can't set mountpoint, exec, setuid or devices, and a change to readonly
+// or canmount on a mounted dataset is made but reported as a failure,
+// since libzfs then can't remount it.
 package zfstest
 
 import (
@@ -26,9 +32,8 @@ type snap struct {
 }
 
 type dataset struct {
-	mountpoint string // "none" for none
-	mounted    bool
-	canmount   string
+	mountpoint string // set locally; "" inherits
+	at         string // where it's mounted; "" when it isn't
 	props      map[string]string
 	snaps      []snap
 }
@@ -40,12 +45,9 @@ type Fake struct {
 	ds    map[string]*dataset
 	calls [][]string
 	Now   func() time.Time
-	// FailNext maps a command (its first argument) to an error for its
-	// next call.
+	// FailNext maps a command (its first argument, or "mounter mount"
+	// and "mounter unmount") to an error for its next call.
 	FailNext map[string]error
-	// CreateButNoMount makes the next create make the dataset but fail
-	// to mount it, as a real mount failure would.
-	CreateButNoMount bool
 	// Hook, if set, sees each command before it runs.
 	Hook func(args []string)
 }
@@ -60,7 +62,7 @@ func New(parent, root string) (*Fake, error) {
 		return nil, err
 	}
 	f := &Fake{aside: aside, ds: map[string]*dataset{}, Now: time.Now}
-	f.ds[parent] = &dataset{mountpoint: root, mounted: true, canmount: "on", props: map[string]string{}}
+	f.ds[parent] = &dataset{mountpoint: root, at: root, props: map[string]string{}}
 	return f, nil
 }
 
@@ -69,7 +71,7 @@ func New(parent, root string) (*Fake, error) {
 func (f *Fake) AddUnmounted(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ds[name] = &dataset{mountpoint: "none", canmount: "off", props: map[string]string{}}
+	f.ds[name] = &dataset{mountpoint: "none", props: map[string]string{"canmount": "off"}}
 	os.MkdirAll(f.asideDir(name), 0o755)
 }
 
@@ -85,9 +87,26 @@ func (f *Fake) Prop(ds, prop string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if d, ok := f.ds[ds]; ok {
+		if prop == "mountpoint" {
+			return d.mountpoint
+		}
 		return d.props[prop]
 	}
 	return ""
+}
+
+// SetProp sets a property as root on the host would, such as a local
+// mountpoint left by an older helper.
+func (f *Fake) SetProp(ds, prop, val string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.ds[ds]; ok {
+		if prop == "mountpoint" {
+			d.mountpoint = val
+		} else {
+			d.props[prop] = val
+		}
+	}
 }
 
 // IsDataset reports whether ds exists.
@@ -103,10 +122,10 @@ func (f *Fake) Mounted(ds string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d, ok := f.ds[ds]
-	if !ok || !d.mounted {
+	if !ok || d.at == "" {
 		return "", false
 	}
-	return d.mountpoint, true
+	return d.at, true
 }
 
 // Unmount unmounts ds, as if something on the host had.
@@ -114,6 +133,13 @@ func (f *Fake) Unmount(ds string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unmount(ds)
+}
+
+// MountAt mounts ds at dir, as root on the host could.
+func (f *Fake) MountAt(ds, dir string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mountAt(ds, dir)
 }
 
 // Snapshot takes a snapshot outside the helper, such as the host's
@@ -128,46 +154,77 @@ func noDataset(name string) error {
 	return fmt.Errorf("cannot open '%s': dataset does not exist", name)
 }
 
+func denied(what, name string) error {
+	return fmt.Errorf("cannot %s '%s': permission denied", what, name)
+}
+
 func (f *Fake) asideDir(name string) string {
 	return filepath.Join(f.aside, strings.ReplaceAll(name, "/", "%"))
 }
 
 // data is where ds's files are now.
 func (f *Fake) data(name string) string {
-	if d := f.ds[name]; d.mounted {
-		return d.mountpoint
+	if d := f.ds[name]; d.at != "" {
+		return d.at
 	}
 	return f.asideDir(name)
 }
 
+// mountpoint is ds's mountpoint property, set or inherited.
+func (f *Fake) mountpoint(name string) string {
+	d := f.ds[name]
+	if d.mountpoint != "" {
+		return d.mountpoint
+	}
+	i := strings.LastIndex(name, "/")
+	if i < 0 {
+		return "/" + name
+	}
+	if p := f.mountpoint(name[:i]); p != "none" {
+		return p + "/" + name[i+1:]
+	}
+	return "none"
+}
+
+func (f *Fake) canmount(name string) string {
+	if v := f.ds[name].props["canmount"]; v != "" {
+		return v
+	}
+	return "on"
+}
+
 func (f *Fake) unmount(name string) error {
 	d := f.ds[name]
-	if !d.mounted {
+	if d.at == "" {
 		return nil
 	}
-	if err := os.Rename(d.mountpoint, f.asideDir(name)); err != nil {
+	if err := os.Rename(d.at, f.asideDir(name)); err != nil {
 		return err
 	}
-	d.mounted = false
+	d.at = ""
 	return nil
 }
 
-func (f *Fake) mount(name string) error {
-	d := f.ds[name]
-	if d.mounted {
-		return nil
+// mountAt mounts ds over dir, an empty directory, as a raw mount(2)
+// would: the mountpoint property doesn't matter, canmount=off does.
+func (f *Fake) mountAt(name, dir string) error {
+	d, ok := f.ds[name]
+	if !ok {
+		return noDataset(name)
 	}
-	if d.mountpoint == "none" || d.canmount == "off" {
-		return fmt.Errorf("cannot mount '%s': not mountable", name)
+	if d.at != "" {
+		return fmt.Errorf("%s is already mounted at %s", name, d.at)
 	}
-	// zfs mounts over an empty directory, or makes one.
-	if err := syscall.Rmdir(d.mountpoint); err != nil && !errors.Is(err, syscall.ENOENT) {
-		return fmt.Errorf("cannot mount '%s': directory is not empty", name)
+	if f.canmount(name) == "off" {
+		return fmt.Errorf("cannot mount '%s': canmount=off", name)
 	}
-	if err := os.Rename(f.asideDir(name), d.mountpoint); err != nil {
+	if err := syscall.Rmdir(dir); err != nil {
+		return fmt.Errorf("mount %s on %s: %w", name, dir, err)
+	}
+	if err := os.Rename(f.asideDir(name), dir); err != nil {
 		return err
 	}
-	d.mounted = true
+	d.at = dir
 	return nil
 }
 
@@ -178,6 +235,13 @@ func (f *Fake) parentOf(name string) *dataset {
 	}
 	return f.ds[name[:i]]
 }
+
+// remountProps are the properties libzfs remounts for, which an
+// unprivileged user then can't do.
+var remountProps = map[string]bool{"readonly": true, "canmount": true}
+
+// forbiddenProps aren't delegated.
+var forbiddenProps = map[string]bool{"mountpoint": true, "exec": true, "setuid": true, "devices": true, "zoned": true}
 
 // Run is a zfshelper.Runner.
 func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
@@ -204,36 +268,64 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if !ok {
 			return nil, noDataset(last)
 		}
+		var fields []string
+		for i, a := range args {
+			if a == "-o" {
+				fields = strings.Split(args[i+1], ",")
+			}
+		}
 		used := duBytes(f.data(last))
 		var b strings.Builder
 		for _, p := range strings.Split(args[len(args)-2], ",") {
-			v := "-"
+			v, source := "-", "default"
+			if q, ok := d.props[p]; ok {
+				v, source = q, "local"
+			}
 			switch p {
 			case "used", "referenced":
 				v = fmt.Sprint(used)
 			case "refquota":
-				v = "0"
-				if q := d.props["refquota"]; q != "" && q != "none" {
-					v = q
+				if v == "-" || v == "none" {
+					v = "0"
 				}
 			case "available":
 				v = fmt.Sprint(int64(1) << 40)
 			case "usedbysnapshots":
 				v = fmt.Sprint(int64(len(d.snaps)) * 4096)
-			default:
-				if q := d.props[p]; q != "" {
-					v = q
+			case "readonly":
+				if v == "-" {
+					v = "off"
+				}
+			case "canmount":
+				v = f.canmount(last)
+			case "mountpoint":
+				v = f.mountpoint(last)
+				if d.mountpoint != "" {
+					source = "local"
+				} else {
+					source = "inherited"
 				}
 			}
-			fmt.Fprintf(&b, "%s\t%s\n", p, v)
+			vals := map[string]string{"property": p, "value": v, "source": source}
+			out := make([]string, len(fields))
+			for i, fl := range fields {
+				out[i] = vals[fl]
+			}
+			b.WriteString(strings.Join(out, "\t") + "\n")
 		}
 		return []byte(b.String()), nil
 
 	case "create":
-		var mp string
-		for _, a := range args {
-			if v, ok := strings.CutPrefix(a, "mountpoint="); ok {
-				mp = v
+		props := map[string]string{}
+		for i, a := range args {
+			if a == "-o" {
+				k, v, _ := strings.Cut(args[i+1], "=")
+				props[k] = v
+			}
+		}
+		for k := range props {
+			if forbiddenProps[k] {
+				return nil, denied("create", last)
 			}
 		}
 		if _, ok := f.ds[last]; ok {
@@ -242,16 +334,14 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if f.parentOf(last) == nil {
 			return nil, fmt.Errorf("cannot create '%s': parent does not exist", last)
 		}
-		d := &dataset{mountpoint: mp, canmount: "on", props: map[string]string{}}
-		f.ds[last] = d
+		f.ds[last] = &dataset{props: props}
 		if err := os.Mkdir(f.asideDir(last), 0o755); err != nil {
 			return nil, err
 		}
-		if f.CreateButNoMount {
-			f.CreateButNoMount = false
-			return nil, fmt.Errorf("filesystem successfully created, but not mounted")
+		if !contains(args, "-u") {
+			return nil, errors.New("filesystem successfully created, but it may only be mounted by root")
 		}
-		return nil, f.mount(last)
+		return nil, nil
 
 	case "destroy":
 		if name, snapName, ok := strings.Cut(last, "@"); ok {
@@ -274,6 +364,9 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if !ok {
 			return nil, noDataset(last)
 		}
+		if d.at != "" {
+			return nil, fmt.Errorf("cannot unmount '%s': permission denied", d.at)
+		}
 		if len(d.snaps) > 0 && !contains(args, "-r") {
 			return nil, fmt.Errorf("cannot destroy '%s': filesystem has children", last)
 		}
@@ -281,17 +374,8 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		delete(f.ds, last)
 		return nil, removeAll(dir)
 
-	case "unmount":
-		if _, ok := f.ds[last]; !ok {
-			return nil, noDataset(last)
-		}
-		return nil, f.unmount(last)
-
-	case "mount":
-		if _, ok := f.ds[last]; !ok {
-			return nil, noDataset(last)
-		}
-		return nil, f.mount(last)
+	case "mount", "unmount":
+		return nil, errors.New("only root can mount or unmount filesystems")
 
 	case "rename":
 		from, to := args[len(args)-2], last
@@ -308,65 +392,41 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if strings.SplitN(from, "/", 2)[0] != strings.SplitN(to, "/", 2)[0] {
 			return nil, fmt.Errorf("cannot rename to '%s': datasets must be within same pool", to)
 		}
-		if !d.mounted {
-			if err := os.Rename(f.asideDir(from), f.asideDir(to)); err != nil {
-				return nil, err
-			}
+		if d.at != "" {
+			// It would be remounted, or left mounted at the old place.
+			return nil, fmt.Errorf("cannot rename '%s': it's mounted (the helper renames only unmounted datasets)", from)
+		}
+		if !contains(args, "-u") {
+			return nil, fmt.Errorf("cannot rename '%s': without -u zfs would mount it", from)
+		}
+		if err := os.Rename(f.asideDir(from), f.asideDir(to)); err != nil {
+			return nil, err
 		}
 		delete(f.ds, from)
 		f.ds[to] = d
 		return nil, nil
 
-	case "set":
-		prop, val, _ := strings.Cut(args[1], "=")
+	case "set", "inherit":
+		var prop, val string
+		if args[0] == "set" {
+			prop, val, _ = strings.Cut(args[1], "=")
+		} else {
+			prop = args[1]
+		}
 		d, ok := f.ds[last]
 		if !ok {
 			return nil, noDataset(last)
 		}
-		switch prop {
-		case "mountpoint":
-			if d.mounted {
-				// Remount: the files move with it.
-				if err := os.Rename(d.mountpoint, val); err != nil {
-					return nil, fmt.Errorf("cannot mount '%s': %v", last, err)
-				}
-			}
-			d.mountpoint = val
-		case "canmount":
-			d.canmount = val
-			if val == "off" {
-				if err := f.unmount(last); err != nil {
-					return nil, err
-				}
-			}
-		default:
+		if forbiddenProps[prop] {
+			return nil, denied("set property for", last)
+		}
+		if args[0] == "set" {
 			d.props[prop] = val
-		}
-		return nil, nil
-
-	case "inherit":
-		prop := args[1]
-		d, ok := f.ds[last]
-		if !ok {
-			return nil, noDataset(last)
-		}
-		switch prop {
-		case "mountpoint":
-			p := f.parentOf(last)
-			mp := "none"
-			if p != nil && p.mountpoint != "none" {
-				mp = filepath.Join(p.mountpoint, last[strings.LastIndex(last, "/")+1:])
-			}
-			if d.mounted {
-				if err := f.unmount(last); err != nil {
-					return nil, err
-				}
-			}
-			d.mountpoint = mp
-		case "canmount":
-			d.canmount = "on"
-		default:
+		} else {
 			delete(d.props, prop)
+		}
+		if remountProps[prop] && d.at != "" {
+			return nil, fmt.Errorf("cannot remount '%s': permission denied (exit status 255)", last)
 		}
 		return nil, nil
 
@@ -375,6 +435,94 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, f.snapshot(name, snapName, f.Now())
 	}
 	return nil, fmt.Errorf("fake zfs: unsupported command %v", args)
+}
+
+// Mounter is a fake s3-zfs-mounter, mounting the buckets of parent at
+// root or in staging.
+type Mounter struct {
+	f                     *Fake
+	parent, root, staging string
+}
+
+// Mounter makes a fake mounter for this fake's datasets.
+func (f *Fake) Mounter(parent, root, staging string) *Mounter {
+	return &Mounter{f: f, parent: parent, root: root, staging: staging}
+}
+
+func (m *Mounter) dir(place, bucket string) (string, error) {
+	switch place {
+	case "bucket":
+		return filepath.Join(m.root, bucket), nil
+	case "staging":
+		return filepath.Join(m.staging, bucket), nil
+	}
+	return "", fmt.Errorf("bad place %q", place)
+}
+
+func (m *Mounter) call(op, place, bucket string) error {
+	f := m.f
+	f.calls = append(f.calls, []string{"mounter", op, place, bucket})
+	if f.Hook != nil {
+		f.Hook([]string{"mounter", op, place, bucket})
+	}
+	if err := f.FailNext["mounter "+op]; err != nil {
+		delete(f.FailNext, "mounter "+op)
+		return err
+	}
+	return nil
+}
+
+// Mount mounts the bucket's dataset at its place, making the directory
+// if it's missing and refusing one that isn't empty.
+func (m *Mounter) Mount(ctx context.Context, place, bucket string) error {
+	f := m.f
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := m.call("mount", place, bucket); err != nil {
+		return err
+	}
+	dir, err := m.dir(place, bucket)
+	if err != nil {
+		return err
+	}
+	ds := m.parent + "/" + bucket
+	d, ok := f.ds[ds]
+	if !ok {
+		return noDataset(ds)
+	}
+	if d.at == dir {
+		return nil
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if ents, err := os.ReadDir(dir); err != nil || len(ents) > 0 {
+		return fmt.Errorf("%s isn't an empty directory (%v)", dir, err)
+	}
+	return f.mountAt(ds, dir)
+}
+
+// Unmount unmounts the bucket's dataset from its place, if it's there,
+// and removes the directory if it's empty.
+func (m *Mounter) Unmount(ctx context.Context, place, bucket string) error {
+	f := m.f
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := m.call("unmount", place, bucket); err != nil {
+		return err
+	}
+	dir, err := m.dir(place, bucket)
+	if err != nil {
+		return err
+	}
+	ds := m.parent + "/" + bucket
+	if d, ok := f.ds[ds]; ok && d.at == dir {
+		if err := f.unmount(ds); err != nil {
+			return err
+		}
+	}
+	syscall.Rmdir(dir)
+	return nil
 }
 
 // list answers zfs list -H [-p] [-t snapshot] [-d 1] -o fields name.
@@ -414,12 +562,11 @@ func (f *Fake) list(args []string) ([]byte, error) {
 		sort.Strings(names[1:])
 	}
 	for _, n := range names {
-		x := f.ds[n]
 		mounted := "no"
-		if x.mounted {
+		if f.ds[n].at != "" {
 			mounted = "yes"
 		}
-		row(map[string]string{"name": n, "mountpoint": x.mountpoint, "mounted": mounted, "used": fmt.Sprint(duBytes(f.data(n)))})
+		row(map[string]string{"name": n, "mountpoint": f.mountpoint(n), "mounted": mounted, "used": fmt.Sprint(duBytes(f.data(n)))})
 	}
 	return []byte(b.String()), nil
 }

@@ -40,6 +40,7 @@ func (e *env) config() Config {
 		Parent: parent, Root: e.root, Trash: trash,
 		Staging: filepath.Join(filepath.Dir(e.root), "staging"), StateDir: e.state,
 		Run: e.fake.Run, Now: func() time.Time { return e.clock },
+		Mount: e.fake.Mounter(parent, e.root, filepath.Join(filepath.Dir(e.root), "staging")),
 		// Every "dataset" here is a directory on the same filesystem.
 		SkipMountCheck: true,
 	}
@@ -53,6 +54,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	fake.AddUnmounted(trash)
+	os.Mkdir(filepath.Join(dir, "staging"), 0o700)
 	e := &env{t: t, root: root, state: filepath.Join(dir, "state"), fake: fake, clock: time.Date(2026, 11, 3, 6, 30, 0, 0, time.UTC)}
 	s := New(e.config())
 	if err := s.Check(t.Context()); err != nil {
@@ -185,14 +187,27 @@ func TestAdopt(t *testing.T) {
 	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
 		t.Errorf("state not cleaned up: %v", ents)
 	}
-	var sawStaging, sawMove bool
+	// Created unmounted and never auto-mounted, set up in staging, then
+	// mounted in place by the mounter; canmount=on once it's there. No
+	// mountpoint is ever set.
+	var seq []string
 	for _, c := range e.fake.Calls() {
-		j := strings.Join(c, " ")
-		sawStaging = sawStaging || strings.HasPrefix(j, "create -o mountpoint="+filepath.Join(filepath.Dir(e.root), "staging", "photos"))
-		sawMove = sawMove || j == "set mountpoint="+dir+" "+parent+"/photos"
+		if c[0] != "list" && c[0] != "get" && strings.Contains(strings.Join(c, " "), "photos") {
+			seq = append(seq, strings.Join(c, " "))
+		}
 	}
-	if !sawStaging || !sawMove {
-		t.Errorf("not staged and moved: %v", e.fake.Calls())
+	want := []string{
+		"create -u -o canmount=noauto " + parent + "/photos",
+		"mounter mount staging photos",
+		"mounter unmount staging photos",
+		"mounter mount bucket photos",
+		"set canmount=on " + parent + "/photos",
+	}
+	if strings.Join(seq[:len(want)], "; ") != strings.Join(want, "; ") {
+		t.Errorf("adopt calls:\n%s\nwant:\n%s", strings.Join(seq, "\n"), strings.Join(want, "\n"))
+	}
+	if e.fake.Prop(parent+"/photos", "canmount") != "on" || e.fake.Prop(parent+"/photos", "mountpoint") != "" {
+		t.Errorf("canmount %q, local mountpoint %q", e.fake.Prop(parent+"/photos", "canmount"), e.fake.Prop(parent+"/photos", "mountpoint"))
 	}
 
 	// zfs create fails: the directory stays as it was.
@@ -208,24 +223,30 @@ func TestAdopt(t *testing.T) {
 		if e.xattrs && getxattr(dir, "user.policy") != `{"Version":"2012-10-17"}` {
 			t.Error("xattrs not put back")
 		}
+		if e.fake.IsDataset(parent + "/broken") {
+			t.Error("dataset left behind")
+		}
+		if ents, _ := os.ReadDir(filepath.Join(filepath.Dir(e.root), "staging")); len(ents) != 0 {
+			t.Errorf("staging not cleaned up: %v", ents)
+		}
 	}
 	checkPutBack(broken)
 
-	// Created but not mounted: the dataset is destroyed again.
-	e.fake.CreateButNoMount = true
-	e.want(500, "POST", "/buckets/broken/adopt", nil)
-	if e.fake.IsDataset(parent + "/broken") {
-		t.Error("unmounted dataset left behind")
+	// The mounter fails at each step: the dataset is destroyed again and
+	// the directory left or put back.
+	for _, step := range []string{"mounter mount", "mounter unmount"} {
+		e.fake.FailNext = map[string]error{step: errors.New("mounter says no")}
+		e.want(500, "POST", "/buckets/broken/adopt", nil)
+		checkPutBack(broken)
 	}
-	checkPutBack(broken)
-
-	// Moving the mountpoint fails: the directory is put back, the dataset
-	// destroyed.
-	e.fake.FailNext = map[string]error{"set": errors.New("mount failed")}
-	e.want(500, "POST", "/buckets/broken/adopt", nil)
-	if e.fake.IsDataset(parent + "/broken") {
-		t.Error("dataset left behind")
+	// The final mount fails, after the directory was removed.
+	e.fake.Hook = func(args []string) {
+		if strings.Join(args, " ") == "mounter mount bucket broken" {
+			e.fake.FailNext = map[string]error{"mounter mount": errors.New("mount failed")}
+		}
 	}
+	e.want(500, "POST", "/buckets/broken/adopt", nil)
+	e.fake.Hook = nil
 	checkPutBack(broken)
 	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
 		t.Errorf("state not cleaned up after failures: %v", ents)
@@ -264,7 +285,11 @@ func TestAdoptRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	stage := filepath.Join(filepath.Dir(e.root), "staging", "photos")
-	if _, err := e.fake.Run(t.Context(), "create", "-o", "mountpoint="+stage, parent+"/photos"); err != nil {
+	if _, err := e.fake.Run(t.Context(), "create", "-u", "-o", "canmount=noauto", parent+"/photos"); err != nil {
+		t.Fatal(err)
+	}
+	os.Mkdir(stage, 0o700)
+	if err := e.fake.MountAt(parent+"/photos", stage); err != nil {
 		t.Fatal(err)
 	}
 	os.RemoveAll(dir)
@@ -287,16 +312,20 @@ func TestAdoptRecovery(t *testing.T) {
 		t.Errorf("state left: %v", ents)
 	}
 
-	// A crash after the move: Recover just tidies up.
+	// A crash after the move, before canmount=on: Recover just finishes.
 	e.want(201, "POST", "/buckets/photos/adopt", nil)
 	if err := e.s.saveState("photos", m); err != nil {
 		t.Fatal(err)
 	}
+	e.fake.SetProp(parent+"/photos", "canmount", "noauto")
 	if err := New(e.config()).Check(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !e.fake.IsDataset(parent + "/photos") {
 		t.Error("finished adoption undone")
+	}
+	if e.fake.Prop(parent+"/photos", "canmount") != "on" {
+		t.Error("recovery didn't set canmount=on")
 	}
 	if ents, _ := os.ReadDir(e.state); len(ents) != 0 {
 		t.Errorf("state left: %v", ents)
@@ -466,16 +495,15 @@ func TestDestroy(t *testing.T) {
 	var seq []string
 	for _, c := range e.fake.Calls() {
 		switch c[0] {
-		case "set", "unmount", "rename", "inherit", "destroy":
+		case "set", "mounter", "rename", "inherit", "destroy":
 			seq = append(seq, strings.Join(c, " "))
 		}
 	}
 	want := []string{
 		"set readonly=on " + parent + "/photos",
-		"unmount " + parent + "/photos",
+		"mounter unmount bucket photos",
 		"set canmount=off " + parent + "/photos",
-		"rename " + parent + "/photos " + trash + "/" + entry,
-		"inherit mountpoint " + trash + "/" + entry,
+		"rename -u " + parent + "/photos " + trash + "/" + entry,
 	}
 	if got := strings.Join(seq[len(seq)-len(want):], "; "); got != strings.Join(want, "; ") {
 		t.Errorf("calls:\n%s\nwant:\n%s", got, strings.Join(want, "; "))
@@ -495,12 +523,29 @@ func TestDestroy(t *testing.T) {
 		t.Fatalf("code %s", out)
 	}
 	e.fake.Hook = nil
-	calls = e.fake.Calls()
-	if j := strings.Join(calls[len(calls)-1], " "); j != "inherit readonly "+parent+"/racy" {
-		t.Errorf("not made writable again: %s", j)
+	if e.fake.Prop(parent+"/racy", "readonly") != "" {
+		t.Error("not made writable again")
 	}
 	if !e.fake.IsDataset(parent + "/racy") {
 		t.Error("destroyed anyway")
+	}
+	_ = calls
+
+	// The bucket is busy and the mounter can't unmount it: it stays
+	// mounted, and writable.
+	os.Remove(filepath.Join(e.root, "racy", "late.txt"))
+	e.fake.FailNext = map[string]error{"mounter unmount": busy("in use")}
+	if out := e.want(409, "DELETE", "/buckets/racy", nil); code(out) != zfsapi.CodeBusy {
+		t.Fatalf("code %s", out)
+	}
+	if mp, ok := e.fake.Mounted(parent + "/racy"); !ok || mp != filepath.Join(e.root, "racy") || e.fake.Prop(parent+"/racy", "readonly") != "" {
+		t.Errorf("busy bucket: mounted %v at %s, readonly %q", ok, mp, e.fake.Prop(parent+"/racy", "readonly"))
+	}
+	// The rename fails: it's mounted again, writable, canmount=on.
+	e.fake.FailNext = map[string]error{"rename": errors.New("no")}
+	e.want(500, "DELETE", "/buckets/racy", nil)
+	if _, ok := e.fake.Mounted(parent + "/racy"); !ok || e.fake.Prop(parent+"/racy", "canmount") != "on" || e.fake.Prop(parent+"/racy", "readonly") != "" {
+		t.Errorf("after a failed rename: mounted %v, canmount %q, readonly %q", ok, e.fake.Prop(parent+"/racy", "canmount"), e.fake.Prop(parent+"/racy", "readonly"))
 	}
 	// Plain directories aren't ours to destroy.
 	e.mkBucket("plain")
