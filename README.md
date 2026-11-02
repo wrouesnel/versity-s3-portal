@@ -164,7 +164,11 @@ variables described in `ldap_integration_test.go` are set.
 The gateway integration tests drive a real gateway when `VGW_TEST_S3`,
 `VGW_TEST_ADMIN`, `VGW_TEST_ACCESS` and `VGW_TEST_SECRET` are set. With
 `VGW_TEST_DATA` naming the gateway's posix root as the tests see it, they also
-check that uploads are owned by the uploader:
+check that uploads are owned by the uploader and, if they can write there,
+that the gateway follows symlinks planted in a bucket directory.
+`TestPermissionsAgainstGateway` pins down what keys, web accounts and
+anonymous callers can and can't do, as observed on the gateway: run it after
+any gateway upgrade.
 
 ```sh
 podman run -d --name vgw -p 7070:7070 -p 7071:7071 \
