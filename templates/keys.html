@@ -1,46 +1,28 @@
 {{template "header" .}}
 <section class="card">
   <div class="card-head">
-    <h1>Buckets</h1>
-    <form method="post" action="/buckets" class="row compact">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <input name="name" placeholder="new-bucket-name" aria-label="New bucket name" pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" title="3 to 63 lowercase letters, digits and hyphens" autocapitalize="none" spellcheck="false" required>
-      <button>Create</button>
-    </form>
-  </div>
-  {{if .Buckets}}
-  <ul class="list">
-    {{range .Buckets}}
-    <li>
-      <a class="bucket" href="/browse?bucket={{.}}">{{.}}</a>
-      <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.}}? It has to be empty.">
-        <input type="hidden" name="csrf" value="{{$.CSRF}}">
-        <input type="hidden" name="name" value="{{.}}">
-        <button class="ghost danger small">Delete</button>
-      </form>
-    </li>
-    {{end}}
-  </ul>
-  {{else}}
-  <p class="empty">No buckets yet. Name one above to make it.</p>
-  {{end}}
-</section>
-
-<section class="card">
-  <div class="card-head">
     <h1>Access keys</h1>
     <a class="button" href="/keys/new">New key</a>
   </div>
-  <p class="muted">Each key reaches only the buckets you give it. Make one per app or device, so you can revoke it on its own.</p>
+  <p class="muted">Keys let apps and tools reach buckets over S3. Each key reaches only the buckets you give it, at most at your own level. Make one per app or device, so you can revoke it on its own.</p>
   {{if .Keys}}
   <table class="keys">
     <thead><tr><th>Name</th><th>Access key ID</th><th>Buckets</th><th></th></tr></thead>
     <tbody>
-    {{range .Keys}}
+    {{range .Keys}}{{$now := index $.KeyCaps .Access}}
     <tr>
       <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
       <td><code class="copy">{{.Access}}</code></td>
-      <td>{{template "perms" .Buckets}}</td>
+      <td>
+        {{if .Buckets}}
+        <ul class="perms">
+          {{range $b, $p := .Buckets}}{{$c := index $now $b}}
+          <li><code>{{$b}}</code> <span class="pill {{$p}}">{{permLabel $p}}</span>
+            {{if not (covers $c $p)}}<span class="pill warn" title="You no longer have this much access, so the key is limited too">{{if $c.Any}}now {{capsLabel $c}}{{else}}suspended{{end}}</span>{{end}}</li>
+          {{end}}
+        </ul>
+        {{else}}<span class="muted">no buckets</span>{{end}}
+      </td>
       <td class="actions">
         <a class="button ghost small" href="/keys/edit?access={{.Access}}">Edit</a>
         <form method="post" action="/keys/delete" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
@@ -53,6 +35,8 @@
     {{end}}
     </tbody>
   </table>
+  {{else}}
+  <p class="empty">No keys yet.</p>
   {{end}}
 </section>
 

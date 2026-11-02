@@ -34,6 +34,8 @@ func TestPermissionsAgainstGateway(t *testing.T) {
 	a1, a2, a3, b1 := "a1-"+sfx, "a2-"+sfx, "a3-"+sfx, "b1-"+sfx
 	alice := User{Name: "alice" + sfx, UID: 1001, GID: 1001}
 	bob := User{Name: "bob" + sfx, UID: 1002, GID: 1002}
+	enroll(t, p, alice)
+	enroll(t, p, bob)
 	for _, b := range []string{a1, a2, a3} {
 		ok(t, "create "+b, p.CreateBucket(ctx, alice, b))
 	}

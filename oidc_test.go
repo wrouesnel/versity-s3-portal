@@ -156,7 +156,7 @@ func TestOIDCLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	store, _ := OpenStore(filepath.Join(t.TempDir(), "state.json"))
-	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
+	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour, Store: store}
 	h := NewServer(NewPortal(nil, store), nil, auth, sessions, "t", "https://s3", "us-east-1").Handler()
 
 	// Groups come from userinfo, since the ID token leaves them out.
@@ -227,7 +227,7 @@ func TestOIDCLogin(t *testing.T) {
 func TestOIDCClaimsFromProvider(t *testing.T) {
 	a := &OIDCAuth{UsernameClaim: "preferred_username", GroupsClaim: "groups", UIDClaim: "uidNumber", GIDClaim: "gidNumber"}
 	u, err := a.userFromClaims(map[string]any{"preferred_username": "will", "uidNumber": float64(1000), "gidNumber": "1000"})
-	if err != nil || u != (User{Name: "will", UID: 1000, GID: 1000}) {
+	if err != nil || u.User != (User{Name: "will", UID: 1000, GID: 1000}) {
 		t.Fatalf("%+v %v", u, err)
 	}
 	if _, err := a.userFromClaims(map[string]any{"preferred_username": "root", "uidNumber": float64(0), "gidNumber": float64(0)}); err == nil {

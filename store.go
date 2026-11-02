@@ -7,34 +7,64 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 )
-
-// Perm is what an access key may do in one bucket.
-type Perm string
-
-const (
-	PermRead      Perm = "read"
-	PermReadWrite Perm = "readwrite"
-)
-
-func (p Perm) Valid() bool { return p == PermRead || p == PermReadWrite }
 
 // Key is the portal's record of an access key it issued. The gateway holds
 // the key itself; the portal holds who owns it and what it was granted.
 type Key struct {
-	Owner   string          `json:"owner"`
-	Label   string          `json:"label"`
-	Created time.Time       `json:"created"`
+	Owner   string    `json:"owner"`
+	Label   string    `json:"label"`
+	Created time.Time `json:"created"`
+	// Buckets is what the key was asked to have. What it gets is this
+	// limited by what its owner may currently do in each bucket.
 	Buckets map[string]Perm `json:"buckets"`
 }
 
-// WebAccount is the gateway account the portal acts as in someone's
-// buckets for the file browser. It carries their uid and gid, so files they
-// upload are theirs on disk. Its secret never leaves the portal.
+// WebAccount is the gateway account the portal acts as for someone in the
+// file browser. It carries their uid and gid, so files they upload are
+// theirs on disk. Its secret never leaves the portal.
 type WebAccount struct {
 	Access string `json:"access"`
 	Secret string `json:"secret"`
+}
+
+// Person is what the portal last learned about someone from the directory
+// or their OIDC login.
+type Person struct {
+	UID    int      `json:"uid"`
+	GID    int      `json:"gid"`
+	Groups []string `json:"groups,omitempty"`
+	Admin  bool     `json:"admin,omitempty"`
+	// Source is "ldap" or "oidc": only LDAP people can be re-checked.
+	Source string `json:"source"`
+	// Disabled, with why, stops their sessions, keys and file browser
+	// until the directory says otherwise.
+	Disabled       bool      `json:"disabled,omitempty"`
+	DisabledReason string    `json:"disabledReason,omitempty"`
+	Checked        time.Time `json:"checked"`
+}
+
+func (p *Person) InGroup(group string) bool { return containsFold(p.Groups, group) }
+
+// User is the person as a logged-in user.
+func (p *Person) User(name string) User {
+	return User{Name: name, UID: p.UID, GID: p.GID, Admin: p.Admin}
+}
+
+// BucketMeta is the portal's settings for a bucket.
+type BucketMeta struct {
+	// Groups grants each group a level of access.
+	Groups map[string]Perm `json:"groups,omitempty"`
+}
+
+// SessionRecord is a server-side login session.
+type SessionRecord struct {
+	User    string    `json:"user"`
+	CSRF    string    `json:"csrf"`
+	Expires time.Time `json:"expires"`
 }
 
 type state struct {
@@ -45,39 +75,56 @@ type state struct {
 	// provider's identity for them, so a second identity that maps to the
 	// same username (a renamed account, or the same email local part at
 	// another domain) can't take over their buckets and keys.
-	Subjects map[string]string `json:"subjects,omitempty"`
+	Subjects map[string]string         `json:"subjects,omitempty"`
+	People   map[string]*Person        `json:"people,omitempty"`
+	Buckets  map[string]*BucketMeta    `json:"buckets,omitempty"`
+	Sessions map[string]*SessionRecord `json:"sessions,omitempty"`
 }
 
-// Store is a JSON file of issued keys. Callers serialise access.
+// Store is a JSON file of the portal's state. Each method is safe to call
+// concurrently; callers that read and then write hold Portal.mu as well.
+// Values returned are copies, so callers can't change the store by
+// accident.
 type Store struct {
+	mu    sync.Mutex
 	path  string
 	state state
 }
 
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path, state: state{Keys: map[string]*Key{}, Web: map[string]*WebAccount{}, Subjects: map[string]string{}}}
+	s := &Store{path: path}
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err := json.Unmarshal(data, &s.state); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	if err == nil {
+		if err := json.Unmarshal(data, &s.state); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
 	}
-	if s.state.Keys == nil {
-		s.state.Keys = map[string]*Key{}
+	st := &s.state
+	if st.Keys == nil {
+		st.Keys = map[string]*Key{}
 	}
-	if s.state.Web == nil {
-		s.state.Web = map[string]*WebAccount{}
+	if st.Web == nil {
+		st.Web = map[string]*WebAccount{}
 	}
-	if s.state.Subjects == nil {
-		s.state.Subjects = map[string]string{}
+	if st.Subjects == nil {
+		st.Subjects = map[string]string{}
+	}
+	if st.People == nil {
+		st.People = map[string]*Person{}
+	}
+	if st.Buckets == nil {
+		st.Buckets = map[string]*BucketMeta{}
+	}
+	if st.Sessions == nil {
+		st.Sessions = map[string]*SessionRecord{}
 	}
 	return s, nil
 }
 
+// save writes the state. Callers hold s.mu.
 func (s *Store) save() error {
 	data, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
@@ -102,59 +149,60 @@ func (s *Store) save() error {
 	return os.Rename(tmp.Name(), s.path)
 }
 
+func copyKey(k *Key) *Key {
+	c := *k
+	c.Buckets = make(map[string]Perm, len(k.Buckets))
+	for b, p := range k.Buckets {
+		c.Buckets[b] = p
+	}
+	return &c
+}
+
+func copyPerson(p *Person) *Person {
+	c := *p
+	c.Groups = append([]string(nil), p.Groups...)
+	return &c
+}
+
+// ---------------------------------------------------------------- keys
+
 func (s *Store) Get(access string) (*Key, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	k, ok := s.state.Keys[access]
-	return k, ok
+	if !ok {
+		return nil, false
+	}
+	return copyKey(k), true
 }
 
 func (s *Store) Put(access string, k *Key) error {
-	s.state.Keys[access] = k
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Keys[access] = copyKey(k)
 	return s.save()
 }
 
 func (s *Store) Delete(access string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.state.Keys, access)
 	return s.save()
 }
 
-func (s *Store) Web(user string) (*WebAccount, bool) {
-	w, ok := s.state.Web[user]
-	return w, ok
-}
-
-func (s *Store) PutWeb(user string, w *WebAccount) error {
-	s.state.Web[user] = w
-	return s.save()
-}
-
-func (s *Store) DeleteWeb(user string) error {
-	delete(s.state.Web, user)
-	return s.save()
-}
-
-// Subject returns the OIDC identity bound to user, if any.
-func (s *Store) Subject(user string) (string, bool) {
-	sub, ok := s.state.Subjects[user]
-	return sub, ok
-}
-
-func (s *Store) PutSubject(user, subject string) error {
-	s.state.Subjects[user] = subject
-	return s.save()
-}
-
-// WebUsers returns everyone with a web account.
-func (s *Store) WebUsers() []string {
-	out := keys(s.state.Web)
-	sort.Strings(out)
-	return out
+// KeyEntry is a key with its access key ID.
+type KeyEntry struct {
+	Access string
+	*Key
 }
 
 // Entries returns every key, by owner and then oldest first.
 func (s *Store) Entries() []KeyEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]KeyEntry, 0, len(s.state.Keys))
 	for access, k := range s.state.Keys {
-		out = append(out, KeyEntry{access, k})
+		out = append(out, KeyEntry{access, copyKey(k)})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Owner != out[j].Owner {
@@ -167,55 +215,234 @@ func (s *Store) Entries() []KeyEntry {
 
 // AllKeys returns every access key ID.
 func (s *Store) AllKeys() []string {
-	out := make([]string, 0, len(s.state.Keys))
-	for access := range s.state.Keys {
-		out = append(out, access)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// KeyEntry is a key with its access key ID.
-type KeyEntry struct {
-	Access string
-	*Key
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sortedKeys(s.state.Keys)
 }
 
 // KeysFor returns owner's keys, oldest first.
 func (s *Store) KeysFor(owner string) []KeyEntry {
 	var out []KeyEntry
-	for access, k := range s.state.Keys {
-		if k.Owner == owner {
-			out = append(out, KeyEntry{access, k})
+	for _, e := range s.Entries() {
+		if e.Owner == owner {
+			out = append(out, e)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
 	return out
 }
 
-// Grants returns the keys granted access to bucket.
-func (s *Store) Grants(bucket string) map[string]Perm {
-	out := map[string]Perm{}
+// Grants returns the keys asking for access to bucket.
+func (s *Store) Grants(bucket string) map[string]KeyGrant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]KeyGrant{}
 	for access, k := range s.state.Keys {
 		if p, ok := k.Buckets[bucket]; ok {
-			out[access] = p
+			out[access] = KeyGrant{Owner: k.Owner, Perm: p}
 		}
 	}
 	return out
 }
 
-// Buckets returns every bucket any key is granted.
-func (s *Store) Buckets() []string {
-	seen := map[string]bool{}
-	for _, k := range s.state.Keys {
-		for b := range k.Buckets {
-			seen[b] = true
+// KeyGrant is one key's request for access to a bucket.
+type KeyGrant struct {
+	Owner string
+	Perm  Perm
+}
+
+// ---------------------------------------------------------- web accounts
+
+func (s *Store) Web(user string) (*WebAccount, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.state.Web[user]
+	if !ok {
+		return nil, false
+	}
+	c := *w
+	return &c, true
+}
+
+func (s *Store) PutWeb(user string, w *WebAccount) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := *w
+	s.state.Web[user] = &c
+	return s.save()
+}
+
+func (s *Store) DeleteWeb(user string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.state.Web, user)
+	return s.save()
+}
+
+// WebUsers returns everyone with a web account.
+func (s *Store) WebUsers() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sortedKeys(s.state.Web)
+}
+
+// --------------------------------------------------------------- subjects
+
+// Subject returns the OIDC identity bound to user, if any.
+func (s *Store) Subject(user string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := s.state.Subjects[user]
+	return sub, ok
+}
+
+func (s *Store) PutSubject(user, subject string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Subjects[user] = subject
+	return s.save()
+}
+
+// ----------------------------------------------------------------- people
+
+func (s *Store) Person(name string) (*Person, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.state.People[name]
+	if !ok {
+		return nil, false
+	}
+	return copyPerson(p), true
+}
+
+func (s *Store) PutPerson(name string, p *Person) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.People[name] = copyPerson(p)
+	return s.save()
+}
+
+// People returns everyone the portal knows, by name.
+func (s *Store) People() map[string]*Person {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]*Person, len(s.state.People))
+	for n, p := range s.state.People {
+		out[n] = copyPerson(p)
+	}
+	return out
+}
+
+// KnownGroups returns every group anyone known is in, or has a grant.
+func (s *Store) KnownGroups() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]string{}
+	for _, p := range s.state.People {
+		for _, g := range p.Groups {
+			seen[strings.ToLower(g)] = g
+		}
+	}
+	for _, b := range s.state.Buckets {
+		for g := range b.Groups {
+			seen[strings.ToLower(g)] = g
 		}
 	}
 	out := make([]string, 0, len(seen))
-	for b := range seen {
-		out = append(out, b)
+	for _, g := range seen {
+		out = append(out, g)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ---------------------------------------------------------------- buckets
+
+// BucketMeta returns bucket's settings, empty if it has none.
+func (s *Store) BucketMeta(bucket string) *BucketMeta {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := &BucketMeta{Groups: map[string]Perm{}}
+	if m, ok := s.state.Buckets[bucket]; ok {
+		for g, p := range m.Groups {
+			out.Groups[g] = p
+		}
+	}
+	return out
+}
+
+func (s *Store) PutBucketMeta(bucket string, m *BucketMeta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(m.Groups) == 0 {
+		delete(s.state.Buckets, bucket)
+	} else {
+		c := &BucketMeta{Groups: map[string]Perm{}}
+		for g, p := range m.Groups {
+			c.Groups[g] = p
+		}
+		s.state.Buckets[bucket] = c
+	}
+	return s.save()
+}
+
+// BucketsWithMeta returns every bucket that has settings.
+func (s *Store) BucketsWithMeta() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sortedKeys(s.state.Buckets)
+}
+
+// --------------------------------------------------------------- sessions
+
+func (s *Store) Session(id string) (*SessionRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.state.Sessions[id]
+	if !ok {
+		return nil, false
+	}
+	c := *r
+	return &c, true
+}
+
+// PutSession saves a session, and drops expired ones while it's at it.
+func (s *Store) PutSession(id string, r *SessionRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for k, old := range s.state.Sessions {
+		if now.After(old.Expires) {
+			delete(s.state.Sessions, k)
+		}
+	}
+	c := *r
+	s.state.Sessions[id] = &c
+	return s.save()
+}
+
+func (s *Store) DeleteSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.state.Sessions[id]; !ok {
+		return nil
+	}
+	delete(s.state.Sessions, id)
+	return s.save()
+}
+
+// EndSessions ends all of user's sessions and returns how many there were.
+func (s *Store) EndSessions(user string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, r := range s.state.Sessions {
+		if r.User == user {
+			delete(s.state.Sessions, id)
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	return n, s.save()
 }

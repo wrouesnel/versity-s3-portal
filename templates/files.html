@@ -1,0 +1,205 @@
+{{template "header" .}}
+<div class="split">
+  <aside class="sidebar card" aria-label="Buckets">
+    <form method="post" action="/buckets" class="new-bucket">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input name="name" placeholder="new-bucket-name" aria-label="New bucket name" pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" title="3 to 63 lowercase letters, digits and hyphens" autocapitalize="none" spellcheck="false" required>
+      <button class="small" aria-label="Create bucket">Create</button>
+    </form>
+    {{$open := ""}}{{if .Open}}{{$open = .Open.Name}}{{end}}
+    {{$me := .User.Name}}
+    {{$mine := 0}}{{$shared := 0}}
+    {{range .Buckets}}{{if eq .Owner $me}}{{$mine = 1}}{{else}}{{$shared = 1}}{{end}}{{end}}
+    <nav class="bucket-nav">
+      <h2>Your buckets</h2>
+      {{if $mine}}
+      <ul>
+        {{range .Buckets}}{{if eq .Owner $me}}
+        <li><a class="bucket" href="{{browseURL .Name ""}}"{{if eq .Name $open}} aria-current="page"{{end}}>{{.Name}}</a></li>
+        {{end}}{{end}}
+      </ul>
+      {{else}}<p class="muted small">None yet. Name one above to make it.</p>{{end}}
+      {{if $shared}}
+      <h2>Shared with you</h2>
+      <ul>
+        {{range .Buckets}}{{if ne .Owner $me}}
+        <li><a class="bucket shared" href="{{browseURL .Name ""}}"{{if eq .Name $open}} aria-current="page"{{end}} title="{{.Level}} via {{join .Via ", "}}">{{.Name}}<span class="via">{{.Level}}</span></a></li>
+        {{end}}{{end}}
+      </ul>
+      {{end}}
+    </nav>
+  </aside>
+
+  <section class="pane card" id="pane">
+    <div id="flash">
+    {{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
+    {{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
+    </div>
+
+    {{if not .Open}}
+    <div class="empty-pane">
+      <h1>Files</h1>
+      <p class="muted">Pick a bucket on the left to browse, upload and download its files.</p>
+      <dl class="connect">
+        <dt>S3 endpoint</dt><dd><code class="copy">{{.S3URL}}</code></dd>
+        <dt>Region</dt><dd><code>{{.Region}}</code></dd>
+        <dt>Addressing</dt><dd>Path style</dd>
+      </dl>
+      <p><a class="button ghost" href="/keys">Manage access keys</a></p>
+    </div>
+
+    {{else if .Settings}}
+    <div class="pane-head">
+      <nav class="crumbs" aria-label="Bucket"><a href="{{browseURL .Open.Name ""}}">{{.Open.Name}}</a><span class="sep">/</span><a href="/buckets/settings?bucket={{.Open.Name}}" aria-current="page">Settings</a></nav>
+    </div>
+    <p class="muted">Owned by <strong>{{if .Open.Owner}}{{.Open.Owner}}{{else}}nobody{{end}}</strong>. The owner always has read &amp; write. Groups below give their members access: they see the bucket under “Shared with you”, can use the file browser, and can make keys up to their level.</p>
+
+    <h2>Group access</h2>
+    {{if .Grantees}}
+    <table class="grantees">
+      <thead><tr><th>Group</th><th>Level</th><th></th></tr></thead>
+      <tbody>
+      {{range $g, $p := .Grantees}}
+      <tr>
+        <td><strong>{{$g}}</strong></td>
+        <td>
+          <form method="post" action="/buckets/groups" class="row compact autosubmit">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+            <input type="hidden" name="group" value="{{$g}}">
+            <select name="perm" aria-label="Level for {{$g}}">
+              {{range perms}}<option value="{{.}}"{{if eq . $p}} selected{{end}}>{{.Label}}</option>{{end}}
+            </select>
+            <button class="ghost small">Save</button>
+          </form>
+        </td>
+        <td class="actions">
+          <form method="post" action="/buckets/groups" data-confirm="Take away {{$g}}'s access to {{$.Open.Name}}? Their keys stop reaching it at once.">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+            <input type="hidden" name="group" value="{{$g}}">
+            <input type="hidden" name="perm" value="">
+            <button class="ghost danger small">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="muted">No groups yet: only the owner can reach this bucket.</p>
+    {{end}}
+    <form method="post" action="/buckets/groups" class="row compact add-grant">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="bucket" value="{{.Open.Name}}">
+      <input name="group" list="group-list" placeholder="group name" aria-label="Group" autocomplete="off" required>
+      <datalist id="group-list">{{range .GroupList}}<option value="{{.}}">{{end}}</datalist>
+      <select name="perm" aria-label="Level">
+        {{range perms}}<option value="{{.}}"{{if eq . "read"}} selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+      <button>Give access</button>
+    </form>
+    <dl class="levels">
+      <dt>Read &amp; write</dt><dd>List, download, upload, overwrite and delete.</dd>
+      <dt>Add only</dt><dd>List and download, and add new files, but never overwrite or delete anything.</dd>
+      <dt>Read only</dt><dd>List and download.</dd>
+      <dt>Write only</dt><dd>Upload (a drop box): can't list, download or delete.</dd>
+    </dl>
+
+    <section class="danger-zone">
+      <h2>Delete bucket</h2>
+      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.</p>
+      <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.Open.Name}}? It has to be empty.">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input type="hidden" name="name" value="{{.Open.Name}}">
+        <button class="danger">Delete {{.Open.Name}}</button>
+      </form>
+    </section>
+
+    {{else}}
+    {{$caps := .Open.Caps}}
+    <div class="drop-target" id="files" data-bucket="{{.Open.Name}}" data-prefix="{{.Prefix}}" data-csrf="{{.CSRF}}"{{if or $caps.Put $caps.Create}} data-upload{{end}}>
+      <div class="pane-head">
+        <nav class="crumbs" aria-label="Folder">
+          <a href="{{browseURL .Open.Name ""}}">{{.Open.Name}}</a>{{range .Crumbs}}<span class="sep">/</span><a href="{{browseURL $.Open.Name .Prefix}}">{{.Name}}</a>{{end}}
+        </nav>
+        <div class="row compact toolbar">
+          {{if or $caps.Put $caps.Create}}
+          <label class="button" tabindex="0">Upload<input type="file" class="pick" multiple hidden></label>
+          <label class="button ghost" tabindex="0">Upload folder<input type="file" class="pick" webkitdirectory hidden></label>
+          <details class="menu">
+            <summary class="button ghost">New folder</summary>
+            <form method="post" action="/folders" class="row compact pop">
+              <input type="hidden" name="csrf" value="{{.CSRF}}">
+              <input type="hidden" name="bucket" value="{{.Open.Name}}">
+              <input type="hidden" name="prefix" value="{{.Prefix}}">
+              <input name="name" placeholder="folder name" aria-label="New folder name" required>
+              <button>Create</button>
+            </form>
+          </details>
+          {{end}}
+          {{if .Open.Manage}}<a class="button ghost" href="/buckets/settings?bucket={{.Open.Name}}" title="Who has access, and deleting the bucket">Settings</a>{{end}}
+        </div>
+      </div>
+      <p class="access-note muted small">
+        {{if eq .Open.Owner .User.Name}}Your bucket.{{else}}{{if .Open.Owner}}{{.Open.Owner}}'s bucket{{else}}Bucket{{end}}{{if .Open.Via}}, shared with {{join .Open.Via ", "}}{{end}}.{{end}}
+        You can: {{template "level" $caps}}{{if and $caps.Create (not $caps.Put)}} — new files only; existing names are refused{{end}}
+      </p>
+      <ul id="upload-status" class="uploads" aria-live="polite"></ul>
+
+      {{if not $caps.Read}}
+      <p class="empty">This bucket is a drop box for you: upload files here, but you can't see what's in it.</p>
+      {{else if .Listing}}
+      {{if or .Listing.Prefixes .Listing.Objects}}
+      <table class="files">
+        <thead><tr><th>Name</th><th class="num">Size</th><th class="when">Modified</th><th></th></tr></thead>
+        <tbody>
+        {{range .Listing.Prefixes}}
+        <tr>
+          <td><a class="folder" href="{{browseURL $.Open.Name .}}">{{folderName $.Prefix .}}</a></td>
+          <td class="num muted">—</td>
+          <td class="when"></td>
+          <td class="actions">
+            {{if $caps.Delete}}
+            <form method="post" action="/folders/delete" data-confirm="Delete the folder {{folderName $.Prefix .}} and everything in it?">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+              <input type="hidden" name="prefix" value="{{$.Prefix}}">
+              <input type="hidden" name="folder" value="{{.}}">
+              <button class="ghost danger small">Delete</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+        {{range .Listing.Objects}}
+        <tr>
+          <td><a class="file" href="/download?bucket={{$.Open.Name}}&amp;key={{.Key}}" download>{{within $.Prefix .Key}}</a></td>
+          <td class="num">{{humanSize .Size}}</td>
+          <td class="when muted">{{.LastModified.Local.Format "2 Jan 2006 15:04"}}</td>
+          <td class="actions">
+            {{if $caps.Delete}}
+            <form method="post" action="/objects/delete" data-confirm="Delete {{within $.Prefix .Key}}?">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+              <input type="hidden" name="prefix" value="{{$.Prefix}}">
+              <input type="hidden" name="key" value="{{.Key}}">
+              <button class="ghost danger small">Delete</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{if .NextToken}}<p><a class="button ghost small" href="/files?bucket={{.Open.Name}}&amp;prefix={{.Prefix}}&amp;token={{.NextToken}}">Next page</a></p>{{end}}
+      {{else}}
+      <p class="empty">{{if .Prefix}}This folder is empty.{{else}}This bucket is empty.{{end}}{{if or $caps.Put $caps.Create}} Drop files here to upload them.{{end}}</p>
+      {{end}}
+      {{end}}
+      <div class="drop-hint" aria-hidden="true">Drop to upload to {{if .Prefix}}{{.Prefix}}{{else}}{{.Open.Name}}{{end}}</div>
+    </div>
+    {{end}}
+  </section>
+</div>
+{{template "footer" .}}

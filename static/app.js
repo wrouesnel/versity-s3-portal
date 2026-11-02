@@ -189,13 +189,6 @@ window.addEventListener("popstate", (ev) => {
 
 // ------------------------------------------------------------------ enhance
 
-function markCurrentNav() {
-  const here = location.pathname === "/admin" ? "/admin" : "/";
-  for (const a of document.querySelectorAll("nav.links a")) {
-    if (a.getAttribute("href") === here) a.setAttribute("aria-current", "page");
-  }
-}
-
 function addCopyButtons() {
   if (!navigator.clipboard) return;
   for (const el of document.querySelectorAll(".copy")) {
@@ -228,9 +221,14 @@ function addCopyButtons() {
 }
 
 function enhance() {
-  markCurrentNav();
   addCopyButtons();
 }
+
+// A level picker saves as soon as it changes.
+document.addEventListener("change", (ev) => {
+  const form = ev.target.closest && ev.target.closest("form.autosubmit");
+  if (form && ev.target.tagName === "SELECT") form.requestSubmit();
+});
 
 // Close an open menu when clicking elsewhere.
 document.addEventListener("click", (ev) => {
@@ -339,24 +337,29 @@ async function walk(entry, path, out) {
 }
 
 let dragDepth = 0;
-document.addEventListener("dragenter", (ev) => {
+function dropBox() {
   const box = document.getElementById("files");
+  return box && box.hasAttribute("data-upload") ? box : null;
+}
+
+document.addEventListener("dragenter", (ev) => {
+  const box = dropBox();
   if (!box || !ev.dataTransfer.types.includes("Files")) return;
   dragDepth++;
   box.classList.add("dragging");
 });
 document.addEventListener("dragleave", () => {
-  const box = document.getElementById("files");
+  const box = dropBox();
   if (box && --dragDepth <= 0) {
     dragDepth = 0;
     box.classList.remove("dragging");
   }
 });
 document.addEventListener("dragover", (ev) => {
-  if (document.getElementById("files")) ev.preventDefault();
+  if (dropBox()) ev.preventDefault();
 });
 document.addEventListener("drop", async (ev) => {
-  const box = document.getElementById("files");
+  const box = dropBox();
   if (!box) return;
   ev.preventDefault();
   dragDepth = 0;

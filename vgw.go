@@ -253,9 +253,13 @@ func (v *VGW) GetObject(ctx context.Context, bucket, key string) (*http.Response
 	return v.stream(ctx, http.MethodGet, objectPath(bucket, key), nil, 0, nil)
 }
 
-// PutObject streams length bytes of body into the object.
-func (v *VGW) PutObject(ctx context.Context, bucket, key string, body io.Reader, length int64, contentType string) error {
+// PutObject streams length bytes of body into the object. With
+// createOnly, it fails with PreconditionFailed if the object exists.
+func (v *VGW) PutObject(ctx context.Context, bucket, key string, body io.Reader, length int64, contentType string, createOnly bool) error {
 	headers := map[string]string{}
+	if createOnly {
+		headers["If-None-Match"] = "*"
+	}
 	if contentType != "" {
 		headers["Content-Type"] = contentType
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
 	"errors"
 	"fmt"
@@ -19,15 +20,15 @@ import (
 	"unicode/utf8"
 )
 
-// Owner accounts own a user's buckets. Their secrets are thrown away, so
-// nobody can sign as them: users reach their buckets only through keys the
+// Owner accounts own a person's buckets. Their secrets are thrown away, so
+// nobody can sign as them: people reach buckets only through accounts the
 // portal grants with bucket policies.
 const ownerPrefix = "owner."
 
 func ownerAccess(username string) string { return ownerPrefix + username }
 
-// Web accounts are how the file browser reaches a person's buckets: each
-// bucket's policy gives its owner's web account read & write.
+// Web accounts are how the file browser reaches buckets: each bucket's
+// policy gives each person's web account whatever that person may do there.
 const webPrefix = "web."
 
 func webAccess(username string) string { return webPrefix + username }
@@ -41,10 +42,17 @@ func (e *UserError) Error() string { return e.Msg }
 
 func userErr(format string, args ...any) error { return &UserError{fmt.Sprintf(format, args...)} }
 
+// Portal is the service's logic. Access to a bucket comes from owning it
+// or from a group grant on it; keys and the file browser get that access,
+// limited by what each key was asked for, through bucket policies the
+// portal writes from its records and the directory's current view of
+// people.
 type Portal struct {
 	mu    sync.Mutex
 	vgw   *VGW
 	store *Store
+	// dir, when set, is asked about people after they log in.
+	dir Directory
 
 	// The gateway's bucket list, kept briefly: every page and file
 	// operation checks who owns what, and listing every bucket each time
@@ -54,9 +62,17 @@ type Portal struct {
 	cacheMu      sync.Mutex
 	bucketCache  []Bucket
 	bucketCached time.Time
+
+	// written is a hash of each bucket's policy as last written, so
+	// resyncing everything only touches buckets whose policy changed.
+	written map[string][32]byte
 }
 
 const bucketCacheTTL = 5 * time.Second
+
+func NewPortal(vgw *VGW, store *Store) *Portal {
+	return &Portal{vgw: vgw, store: store, written: map[string][32]byte{}}
+}
 
 // listBuckets is the gateway's bucket list, from the cache when it's fresh.
 func (p *Portal) listBuckets(ctx context.Context) ([]Bucket, error) {
@@ -77,10 +93,6 @@ func (p *Portal) forgetBuckets() {
 	p.cacheMu.Lock()
 	p.bucketCache = nil
 	p.cacheMu.Unlock()
-}
-
-func NewPortal(vgw *VGW, store *Store) *Portal {
-	return &Portal{vgw: vgw, store: store}
 }
 
 func newAccessKey() string {
@@ -106,6 +118,377 @@ func newSecret() string {
 	return string(out)
 }
 
+// ------------------------------------------------------------------ people
+
+// Login records what a login proved about someone and returns them as a
+// user. A person the directory had disabled is enabled again by logging
+// in, since logging in means the directory let them.
+func (p *Portal) Login(ctx context.Context, id Identity, source string) (User, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old, existed := p.store.Person(id.Name)
+	person := &Person{
+		UID: id.UID, GID: id.GID, Groups: id.Groups, Admin: id.Admin,
+		Source: source, Checked: time.Now().UTC(),
+	}
+	sort.Strings(person.Groups)
+	if err := p.store.PutPerson(id.Name, person); err != nil {
+		return User{}, err
+	}
+	if existed && p.accessChanged(old, person) {
+		if err := p.syncAll(ctx); err != nil {
+			return User{}, err
+		}
+	}
+	return person.User(id.Name), nil
+}
+
+// accessChanged says whether a person's change affects bucket policies.
+func (p *Portal) accessChanged(old, new *Person) bool {
+	return old.Disabled != new.Disabled || strings.Join(old.Groups, "\n") != strings.Join(new.Groups, "\n")
+}
+
+// PersonStatus is what a check of someone found.
+type PersonStatus struct {
+	User     string    `json:"user"`
+	Known    bool      `json:"known"`
+	Source   string    `json:"source,omitempty"`
+	Disabled bool      `json:"disabled"`
+	Reason   string    `json:"reason,omitempty"`
+	Groups   []string  `json:"groups,omitempty"`
+	Admin    bool      `json:"admin"`
+	Checked  time.Time `json:"checked,omitempty"`
+	Changed  bool      `json:"changed"`
+	// Sessions ended because of this check.
+	EndedSessions int `json:"endedSessions,omitempty"`
+	Keys          int `json:"keys"`
+}
+
+func statusOf(name string, person *Person, keys int) PersonStatus {
+	return PersonStatus{
+		User: name, Known: true, Source: person.Source, Disabled: person.Disabled,
+		Reason: person.DisabledReason, Groups: person.Groups, Admin: person.Admin,
+		Checked: person.Checked, Keys: keys,
+	}
+}
+
+// Status returns what the portal knows about someone, without asking the
+// directory.
+func (p *Portal) Status(name string) PersonStatus {
+	person, ok := p.store.Person(name)
+	if !ok {
+		return PersonStatus{User: name}
+	}
+	return statusOf(name, person, len(p.store.KeysFor(name)))
+}
+
+// applyDir updates a person from a directory answer and returns whether
+// their access changed. Callers hold p.mu.
+func (p *Portal) applyDir(name string, person *Person, d DirEntry) (changed bool, ended int, err error) {
+	updated := copyPerson(person)
+	updated.Checked = time.Now().UTC()
+	updated.Disabled, updated.DisabledReason = d.Disabled, d.Reason
+	if !d.Disabled {
+		updated.Groups, updated.Admin = d.Groups, d.Admin
+		if d.UID != person.UID || d.GID != person.GID {
+			// Gateway accounts carry the old ids; new keys get the new ones.
+			slog.Warn("person's uid or gid changed in the directory", "user", name,
+				"uid", person.UID, "newUID", d.UID, "gid", person.GID, "newGID", d.GID)
+			updated.UID, updated.GID = d.UID, d.GID
+		}
+	} else {
+		updated.Admin = false
+	}
+	changed = p.accessChanged(person, updated) || person.Admin != updated.Admin
+	if err := p.store.PutPerson(name, updated); err != nil {
+		return false, 0, err
+	}
+	if updated.Disabled {
+		if ended, err = p.store.EndSessions(name); err != nil {
+			return false, 0, err
+		}
+	}
+	if changed {
+		if updated.Disabled {
+			slog.Warn("directory disabled person: suspending their sessions, keys and file access",
+				"user", name, "reason", updated.DisabledReason, "sessions", ended)
+		} else if person.Disabled {
+			slog.Warn("directory re-enabled person: restoring their keys and file access", "user", name)
+		} else {
+			slog.Info("person's groups or admin rights changed in the directory", "user", name,
+				"groups", updated.Groups, "admin", updated.Admin)
+		}
+	}
+	return changed, ended, nil
+}
+
+var errNoDirectory = userErr("There's no directory to check people against: only LDAP people can be checked.")
+
+// CheckPerson asks the directory about one person now and applies the
+// answer: disabling them ends their sessions and suspends their keys and
+// file access; re-enabling restores them.
+func (p *Portal) CheckPerson(ctx context.Context, name string) (PersonStatus, error) {
+	if p.dir == nil {
+		return PersonStatus{}, errNoDirectory
+	}
+	person, ok := p.store.Person(name)
+	if !ok {
+		return PersonStatus{User: name}, nil
+	}
+	if person.Source != "ldap" {
+		return statusOf(name, person, len(p.store.KeysFor(name))), userErr("%s logs in with OIDC, so the directory can't be asked about them.", name)
+	}
+	d, err := p.dir.Check(name)
+	if err != nil {
+		return PersonStatus{}, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	person, _ = p.store.Person(name)
+	changed, ended, err := p.applyDir(name, person, d)
+	if err != nil {
+		return PersonStatus{}, err
+	}
+	if changed {
+		if err := p.syncAll(ctx); err != nil {
+			return PersonStatus{}, err
+		}
+	}
+	person, _ = p.store.Person(name)
+	st := statusOf(name, person, len(p.store.KeysFor(name)))
+	st.Changed, st.EndedSessions = changed, ended
+	return st, nil
+}
+
+// SyncReport is what a whole-directory sync did.
+type SyncReport struct {
+	Checked  int            `json:"checked"`
+	Changed  []PersonStatus `json:"changed"`
+	Disabled int            `json:"disabled"`
+	Took     string         `json:"took"`
+}
+
+// SyncDirectory checks everyone who logs in with LDAP against the
+// directory at once.
+func (p *Portal) SyncDirectory(ctx context.Context) (SyncReport, error) {
+	if p.dir == nil {
+		return SyncReport{}, errNoDirectory
+	}
+	start := time.Now()
+	all, err := p.dir.CheckAll()
+	if err != nil {
+		return SyncReport{}, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	report := SyncReport{Changed: []PersonStatus{}}
+	any := false
+	people := p.store.People()
+	for _, name := range sortedKeys(people) {
+		person := people[name]
+		if person.Source != "ldap" {
+			continue
+		}
+		d, found := all[name]
+		if !found {
+			d = DirEntry{Disabled: true, Reason: "not in the directory"}
+		}
+		changed, ended, err := p.applyDir(name, person, d)
+		if err != nil {
+			return report, err
+		}
+		report.Checked++
+		if d.Disabled {
+			report.Disabled++
+		}
+		if changed || ended > 0 {
+			updated, _ := p.store.Person(name)
+			st := statusOf(name, updated, len(p.store.KeysFor(name)))
+			st.Changed, st.EndedSessions = changed, ended
+			report.Changed = append(report.Changed, st)
+		}
+		any = any || changed
+	}
+	if any {
+		if err := p.syncAll(ctx); err != nil {
+			return report, err
+		}
+	}
+	report.Took = time.Since(start).Round(time.Millisecond).String()
+	return report, nil
+}
+
+// PollDirectory syncs with the directory every interval until ctx ends.
+func (p *Portal) PollDirectory(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		report, err := p.SyncDirectory(ctx)
+		if err != nil {
+			slog.Error("directory sync", "err", err)
+			continue
+		}
+		if len(report.Changed) > 0 {
+			slog.Info("directory sync", "checked", report.Checked, "changed", len(report.Changed), "took", report.Took)
+		}
+	}
+}
+
+// --------------------------------------------------------------- access
+
+// BucketView is a bucket as one person sees it.
+type BucketView struct {
+	Name string
+	// Owner is the owning person's username, or "" if no person owns it.
+	Owner string
+	Caps  Caps
+	// Via is how a person who doesn't own it got access: the group grants
+	// that apply to them.
+	Via []string
+	// Manage is whether they may change its grants or delete it.
+	Manage bool
+}
+
+// Level names the access, for display.
+func (b BucketView) Level() string { return capsLabel(b.Caps) }
+
+func capsLabel(c Caps) string {
+	for _, p := range Perms {
+		if p.Caps() == c.norm() {
+			return p.Label()
+		}
+	}
+	var parts []string
+	if c.Read {
+		parts = append(parts, "read")
+	}
+	if c.Put {
+		parts = append(parts, "write")
+	} else if c.Create {
+		parts = append(parts, "add")
+	}
+	if c.Delete {
+		parts = append(parts, "delete")
+	}
+	if len(parts) == 0 {
+		return "no access"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// access is what person name may do in bucket, owned by ownerAcct, given
+// its settings.
+func access(name string, person *Person, ownerAcct string, meta *BucketMeta) (Caps, []string) {
+	if person == nil || person.Disabled {
+		return Caps{}, nil
+	}
+	if ownerAcct == ownerAccess(name) {
+		return PermReadWrite.Caps(), nil
+	}
+	var c Caps
+	var via []string
+	for g, perm := range meta.Groups {
+		if person.InGroup(g) {
+			c = c.Union(perm.Caps())
+			via = append(via, g)
+		}
+	}
+	sort.Strings(via)
+	return c, via
+}
+
+func ownerName(acct string) string {
+	name, _ := strings.CutPrefix(acct, ownerPrefix)
+	if name == acct {
+		return ""
+	}
+	return name
+}
+
+// Buckets returns the buckets u may reach, theirs first.
+func (p *Portal) Buckets(ctx context.Context, u User) ([]BucketView, error) {
+	all, err := p.listBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	person, _ := p.store.Person(u.Name)
+	var out []BucketView
+	for _, b := range all {
+		c, via := access(u.Name, person, b.Owner, p.store.BucketMeta(b.Name))
+		if c.None() {
+			continue
+		}
+		owner := ownerName(b.Owner)
+		out = append(out, BucketView{Name: b.Name, Owner: owner, Caps: c, Via: via, Manage: owner == u.Name || u.Admin})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		oi, oj := out[i].Owner == u.Name, out[j].Owner == u.Name
+		if oi != oj {
+			return oi
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+// Bucket returns how u sees one bucket, fresh from the gateway when
+// fresh is set (for decisions that grant access). Admins may manage every
+// bucket, even ones they can't read.
+func (p *Portal) Bucket(ctx context.Context, u User, bucket string, fresh bool) (BucketView, error) {
+	var all []Bucket
+	var err error
+	if fresh {
+		all, err = p.vgw.ListBuckets(ctx)
+	} else {
+		all, err = p.listBuckets(ctx)
+	}
+	if err != nil {
+		return BucketView{}, err
+	}
+	for _, b := range all {
+		if b.Name != bucket {
+			continue
+		}
+		person, _ := p.store.Person(u.Name)
+		c, via := access(u.Name, person, b.Owner, p.store.BucketMeta(b.Name))
+		owner := ownerName(b.Owner)
+		v := BucketView{Name: b.Name, Owner: owner, Caps: c, Via: via, Manage: (owner == u.Name && c.Any()) || u.Admin}
+		if c.None() && !v.Manage {
+			break
+		}
+		return v, nil
+	}
+	return BucketView{}, userErr("No such bucket.")
+}
+
+// AllBuckets returns every bucket with its owner and grants, for admins.
+func (p *Portal) AllBuckets(ctx context.Context) ([]BucketSummary, error) {
+	all, err := p.listBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BucketSummary, 0, len(all))
+	for _, b := range all {
+		out = append(out, BucketSummary{Name: b.Name, Owner: ownerName(b.Owner), Groups: p.store.BucketMeta(b.Name).Groups})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// BucketSummary is a bucket on the admin page.
+type BucketSummary struct {
+	Name   string
+	Owner  string
+	Groups map[string]Perm
+}
+
+// ---------------------------------------------------------------- buckets
+
 // ensureOwner creates the user's owner account if it doesn't exist.
 func (p *Portal) ensureOwner(ctx context.Context, u User) error {
 	accounts, err := p.vgw.ListAccounts(ctx)
@@ -121,52 +504,6 @@ func (p *Portal) ensureOwner(ctx context.Context, u User) error {
 		Access: ownerAccess(u.Name), Secret: newSecret(), Role: "user",
 		UserID: u.UID, GroupID: u.GID,
 	})
-}
-
-// Buckets returns the names of the buckets u owns.
-func (p *Portal) Buckets(ctx context.Context, u User) ([]string, error) {
-	buckets, err := p.listBuckets(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, b := range buckets {
-		if b.Owner == ownerAccess(u.Name) {
-			out = append(out, b.Name)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func (p *Portal) ownsBucket(ctx context.Context, u User, bucket string) (bool, error) {
-	buckets, err := p.Buckets(ctx, u)
-	if err != nil {
-		return false, err
-	}
-	for _, b := range buckets {
-		if b == bucket {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (p *Portal) Keys(u User) []KeyEntry {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.store.KeysFor(u.Name)
-}
-
-func (p *Portal) Key(u User, access string) (*Key, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	k, ok := p.store.Get(access)
-	if !ok || k.Owner != u.Name {
-		return nil, userErr("No such key.")
-	}
-	copied := *k
-	return &copied, nil
 }
 
 // BindSubject ties username to an OIDC identity the first time it logs in,
@@ -206,6 +543,10 @@ func (p *Portal) CreateBucket(ctx context.Context, u User, name string) error {
 		return err
 	}
 	slog.Info("created bucket", "user", u.Name, "bucket", name)
+	// Settings left over from an older bucket of the same name don't apply.
+	if err := p.store.PutBucketMeta(name, &BucketMeta{}); err != nil {
+		return err
+	}
 	// So the file browser can open it.
 	if _, err := p.ensureWeb(ctx, u); err != nil {
 		return err
@@ -216,12 +557,12 @@ func (p *Portal) CreateBucket(ctx context.Context, u User, name string) error {
 func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	owns, err := p.ownsBucket(ctx, u, name)
+	v, err := p.Bucket(ctx, u, name, true)
 	if err != nil {
 		return err
 	}
-	if !owns {
-		return userErr("No such bucket.")
+	if !v.Manage {
+		return userErr("Only the bucket's owner or an admin can delete it.")
 	}
 	err = p.vgw.DeleteBucket(ctx, name)
 	p.forgetBuckets()
@@ -231,7 +572,8 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 	if err != nil {
 		return err
 	}
-	for _, e := range p.store.KeysFor(u.Name) {
+	delete(p.written, name)
+	for _, e := range p.store.Entries() {
 		if _, ok := e.Buckets[name]; ok {
 			delete(e.Buckets, name)
 			if err := p.store.Put(e.Access, e.Key); err != nil {
@@ -239,26 +581,131 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 			}
 		}
 	}
+	if err := p.store.PutBucketMeta(name, &BucketMeta{}); err != nil {
+		return err
+	}
 	slog.Info("deleted bucket", "user", u.Name, "bucket", name)
 	return nil
 }
 
-// checkGrants makes sure u owns every bucket in grants. It asks the gateway
-// rather than the cache, since it decides what a key can reach.
-func (p *Portal) checkGrants(ctx context.Context, u User, grants map[string]Perm) error {
-	all, err := p.vgw.ListBuckets(ctx)
+var groupNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,63}$`)
+
+// SetGroupGrant gives group a level of access to bucket, or with perm ""
+// takes it away. Only the bucket's owner and admins may.
+func (p *Portal) SetGroupGrant(ctx context.Context, u User, bucket, group string, perm Perm) error {
+	group = strings.TrimSpace(group)
+	if !groupNameRe.MatchString(group) {
+		return userErr("That isn't a group name.")
+	}
+	if perm != "" && !perm.Valid() {
+		return userErr("Pick a level of access.")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	v, err := p.Bucket(ctx, u, bucket, true)
 	if err != nil {
 		return err
 	}
-	ownedSet := map[string]bool{}
-	for _, b := range all {
-		if b.Owner == ownerAccess(u.Name) {
-			ownedSet[b.Name] = true
+	if !v.Manage {
+		return userErr("Only the bucket's owner or an admin can change who has access.")
+	}
+	meta := p.store.BucketMeta(bucket)
+	// Group names compare without case; keep one spelling.
+	for g := range meta.Groups {
+		if strings.EqualFold(g, group) {
+			delete(meta.Groups, g)
 		}
 	}
+	if perm != "" {
+		meta.Groups[group] = perm
+	}
+	if err := p.store.PutBucketMeta(bucket, meta); err != nil {
+		return err
+	}
+	// Members need web accounts to browse it.
+	if perm != "" {
+		for name, person := range p.store.People() {
+			if person.InGroup(group) && !person.Disabled {
+				if _, err := p.ensureWebFor(ctx, name, person); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := p.syncBuckets(ctx, []string{bucket}); err != nil {
+		return err
+	}
+	slog.Info("changed group access", "user", u.Name, "bucket", bucket, "group", group, "perm", perm)
+	return nil
+}
+
+// Groups lists groups that can be granted access: the directory's, plus
+// any the portal has seen.
+func (p *Portal) Groups() []string {
+	seen := map[string]string{}
+	for _, g := range p.store.KnownGroups() {
+		seen[strings.ToLower(g)] = g
+	}
+	if p.dir != nil {
+		if groups, err := p.dir.Groups(); err == nil {
+			for _, g := range groups {
+				seen[strings.ToLower(g)] = g
+			}
+		} else {
+			slog.Warn("list directory groups", "err", err)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for _, g := range seen {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ------------------------------------------------------------------- keys
+
+func (p *Portal) Keys(u User) []KeyEntry { return p.store.KeysFor(u.Name) }
+
+func (p *Portal) Key(u User, access string) (*Key, error) {
+	k, ok := p.store.Get(access)
+	if !ok || k.Owner != u.Name {
+		return nil, userErr("No such key.")
+	}
+	return k, nil
+}
+
+// KeyAccess is what a key can do in each bucket it asked for right now,
+// which is less than it asked for when its owner has lost access.
+func (p *Portal) KeyAccess(ctx context.Context, k *Key) map[string]Caps {
+	all, err := p.listBuckets(ctx)
+	if err != nil {
+		return nil
+	}
+	owners := map[string]string{}
+	for _, b := range all {
+		owners[b.Name] = b.Owner
+	}
+	person, _ := p.store.Person(k.Owner)
+	out := map[string]Caps{}
+	for b, perm := range k.Buckets {
+		c, _ := access(k.Owner, person, owners[b], p.store.BucketMeta(b))
+		out[b] = perm.Caps().Intersect(c)
+	}
+	return out
+}
+
+// checkGrants makes sure u may give a key each level in grants. It asks
+// the gateway rather than the cache, since it decides what a key can
+// reach.
+func (p *Portal) checkGrants(ctx context.Context, u User, grants map[string]Perm) error {
 	for b, perm := range grants {
-		if !ownedSet[b] || !perm.Valid() {
-			return userErr("You can only grant access to your own buckets.")
+		if !perm.Valid() {
+			return userErr("Pick a level of access for %s.", b)
+		}
+		v, err := p.Bucket(ctx, u, b, true)
+		if err != nil || !v.Caps.Covers(perm.Caps()) {
+			return userErr("You can't give a key %s access to %s: that's more than you have.", perm.Label(), b)
 		}
 	}
 	return nil
@@ -316,7 +763,16 @@ func (p *Portal) UpdateKey(ctx context.Context, u User, access, label string, gr
 	if !ok || k.Owner != u.Name {
 		return userErr("No such key.")
 	}
-	if err := p.checkGrants(ctx, u, grants); err != nil {
+	// Grants the key already has may stay even if they're more than its
+	// owner has now (they're limited when policies are written); new or
+	// raised ones must be covered.
+	changed := map[string]Perm{}
+	for b, perm := range grants {
+		if k.Buckets[b] != perm {
+			changed[b] = perm
+		}
+	}
+	if err := p.checkGrants(ctx, u, changed); err != nil {
 		return err
 	}
 	affected := append(keys(k.Buckets), keys(grants)...)
@@ -374,11 +830,7 @@ func (p *Portal) revoke(ctx context.Context, accesses []string) error {
 }
 
 // AllKeys returns every issued key, for admins.
-func (p *Portal) AllKeys() []KeyEntry {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.store.Entries()
-}
+func (p *Portal) AllKeys() []KeyEntry { return p.store.Entries() }
 
 // RevokeKey revokes any key, for admins.
 func (p *Portal) RevokeKey(ctx context.Context, admin User, access string) error {
@@ -413,6 +865,31 @@ func (p *Portal) RevokeKeys(ctx context.Context, admin User, owner string) (int,
 	return len(accesses), nil
 }
 
+// EndSessions logs someone out everywhere, for admins.
+func (p *Portal) EndSessions(admin User, name string) (int, error) {
+	n, err := p.store.EndSessions(name)
+	if err == nil {
+		slog.Warn("admin ended sessions", "admin", admin.Name, "user", name, "count", n)
+	}
+	return n, err
+}
+
+// ---------------------------------------------------------------- policies
+
+// syncAll rewrites every bucket's policy that needs it. Callers hold p.mu.
+func (p *Portal) syncAll(ctx context.Context) error {
+	all, err := p.vgw.ListBuckets(ctx)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(all))
+	for _, b := range all {
+		names = append(names, b.Name)
+	}
+	return p.syncBuckets(ctx, names)
+}
+
+// syncBuckets rewrites the named buckets' policies. Callers hold p.mu.
 func (p *Portal) syncBuckets(ctx context.Context, buckets []string) error {
 	if len(buckets) == 0 {
 		return nil
@@ -425,45 +902,77 @@ func (p *Portal) syncBuckets(ctx context.Context, buckets []string) error {
 	for _, b := range all {
 		owners[b.Name] = b.Owner
 	}
+	people := p.store.People()
 	done := map[string]bool{}
+	var errs []error
 	for _, b := range buckets {
 		if done[b] {
 			continue
 		}
 		done[b] = true
-		if err := p.syncBucket(ctx, b, owners[b]); err != nil {
-			return fmt.Errorf("update policy for %s: %w", b, err)
+		owner, exists := owners[b]
+		if !exists {
+			continue
+		}
+		if err := p.syncBucket(ctx, b, owner, people); err != nil {
+			errs = append(errs, fmt.Errorf("update policy for %s: %w", b, err))
 		}
 	}
+	return errors.Join(errs...)
+}
+
+// policyGrants is who gets what in bucket: each key, limited to what its
+// owner may do there now, and each person's web account.
+func (p *Portal) policyGrants(bucket, owner string, people map[string]*Person) map[string]Caps {
+	meta := p.store.BucketMeta(bucket)
+	grants := map[string]Caps{}
+	for acct, g := range p.store.Grants(bucket) {
+		c, _ := access(g.Owner, people[g.Owner], owner, meta)
+		if c = g.Perm.Caps().Intersect(c); c.Any() {
+			grants[acct] = c
+		}
+	}
+	for _, name := range p.store.WebUsers() {
+		w, _ := p.store.Web(name)
+		if c, _ := access(name, people[name], owner, meta); c.Any() {
+			grants[w.Access] = c
+		}
+	}
+	return grants
+}
+
+// syncBucket writes bucket's policy if it differs from what was last
+// written. Callers hold p.mu.
+func (p *Portal) syncBucket(ctx context.Context, bucket, owner string, people map[string]*Person) error {
+	policy := BucketPolicy(bucket, p.policyGrants(bucket, owner, people))
+	sum := sha256.Sum256(policy)
+	if last, ok := p.written[bucket]; ok && last == sum {
+		return nil
+	}
+	var err error
+	if policy == nil {
+		err = p.vgw.DeleteBucketPolicy(ctx, bucket)
+		if IsCode(err, "NoSuchBucketPolicy") || IsCode(err, "NoSuchBucket") {
+			err = nil
+		}
+	} else {
+		err = p.vgw.PutBucketPolicy(ctx, bucket, policy)
+	}
+	if err != nil {
+		delete(p.written, bucket)
+		return err
+	}
+	p.written[bucket] = sum
 	return nil
 }
 
-// syncBucket writes bucket's policy: its keys' grants, and read & write for
-// its owner's web account.
-func (p *Portal) syncBucket(ctx context.Context, bucket, owner string) error {
-	grants := p.store.Grants(bucket)
-	if user, ok := strings.CutPrefix(owner, ownerPrefix); ok {
-		if w, ok := p.store.Web(user); ok {
-			grants[w.Access] = PermReadWrite
-		}
-	}
-	policy := BucketPolicy(bucket, grants)
-	if policy == nil {
-		err := p.vgw.DeleteBucketPolicy(ctx, bucket)
-		if IsCode(err, "NoSuchBucketPolicy") || IsCode(err, "NoSuchBucket") {
-			return nil
-		}
-		return err
-	}
-	return p.vgw.PutBucketPolicy(ctx, bucket, policy)
-}
-
 // Reconcile brings the gateway in line with the store at startup: it drops
-// keys the gateway no longer has and grants on buckets their owner no longer
-// owns, then rewrites the policy of every user-owned bucket.
+// keys and web accounts the gateway no longer has and grants on buckets
+// that are gone, then rewrites every bucket's policy.
 func (p *Portal) Reconcile(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.written = map[string][32]byte{}
 	accounts, err := p.vgw.ListAccounts(ctx)
 	if err != nil {
 		return err
@@ -476,9 +985,9 @@ func (p *Portal) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	owner := map[string]string{}
+	bucketExists := map[string]bool{}
 	for _, b := range buckets {
-		owner[b.Name] = b.Owner
+		bucketExists[b.Name] = true
 	}
 
 	for _, user := range p.store.WebUsers() {
@@ -489,85 +998,90 @@ func (p *Portal) Reconcile(ctx context.Context) error {
 			}
 		}
 	}
-
-	for _, access := range p.store.AllKeys() {
-		k, _ := p.store.Get(access)
-		if !exists[access] {
-			slog.Warn("dropping key missing from the gateway", "access", access, "user", k.Owner)
-			if err := p.store.Delete(access); err != nil {
+	for _, e := range p.store.Entries() {
+		if !exists[e.Access] {
+			slog.Warn("dropping key missing from the gateway", "access", e.Access, "user", e.Owner)
+			if err := p.store.Delete(e.Access); err != nil {
 				return err
 			}
 			continue
 		}
 		changed := false
-		for b := range k.Buckets {
-			if owner[b] != ownerAccess(k.Owner) {
-				slog.Warn("dropping grant on bucket the key's owner doesn't own", "access", access, "bucket", b)
-				delete(k.Buckets, b)
+		for b := range e.Buckets {
+			if !bucketExists[b] {
+				slog.Warn("dropping grant on a bucket that's gone", "access", e.Access, "bucket", b)
+				delete(e.Buckets, b)
 				changed = true
 			}
 		}
 		if changed {
-			if err := p.store.Put(access, k); err != nil {
+			if err := p.store.Put(e.Access, e.Key); err != nil {
 				return err
 			}
 		}
 	}
-
-	var owned []string
-	for _, b := range buckets {
-		if strings.HasPrefix(b.Owner, ownerPrefix) {
-			owned = append(owned, b.Name)
+	for _, b := range p.store.BucketsWithMeta() {
+		if !bucketExists[b] {
+			if err := p.store.PutBucketMeta(b, &BucketMeta{}); err != nil {
+				return err
+			}
 		}
 	}
-	return p.syncBuckets(ctx, owned)
+	return p.syncAll(ctx)
 }
+
+// ------------------------------------------------------------ file browser
 
 // ensureWeb returns u's web account, creating it and opening their buckets
 // to it if it's new. Callers hold p.mu.
 func (p *Portal) ensureWeb(ctx context.Context, u User) (*WebAccount, error) {
-	if w, ok := p.store.Web(u.Name); ok {
+	person, ok := p.store.Person(u.Name)
+	if !ok {
+		person = &Person{UID: u.UID, GID: u.GID}
+	}
+	return p.ensureWebFor(ctx, u.Name, person)
+}
+
+func (p *Portal) ensureWebFor(ctx context.Context, name string, person *Person) (*WebAccount, error) {
+	if w, ok := p.store.Web(name); ok {
 		return w, nil
 	}
-	w := &WebAccount{Access: webAccess(u.Name), Secret: newSecret()}
+	w := &WebAccount{Access: webAccess(name), Secret: newSecret()}
 	// Left over if the portal's state was lost: its secret went with it.
 	p.vgw.DeleteAccount(ctx, w.Access)
 	if err := p.vgw.CreateAccount(ctx, Account{
-		Access: w.Access, Secret: w.Secret, Role: "user", UserID: u.UID, GroupID: u.GID,
+		Access: w.Access, Secret: w.Secret, Role: "user", UserID: person.UID, GroupID: person.GID,
 	}); err != nil {
 		return nil, err
 	}
-	if err := p.store.PutWeb(u.Name, w); err != nil {
+	if err := p.store.PutWeb(name, w); err != nil {
 		return nil, err
 	}
-	buckets, err := p.Buckets(ctx, u)
-	if err != nil {
+	if err := p.syncAll(ctx); err != nil {
 		return nil, err
 	}
-	if err := p.syncBuckets(ctx, buckets); err != nil {
-		return nil, err
-	}
-	slog.Info("created web account", "user", u.Name)
+	slog.Info("created web account", "user", name)
 	return w, nil
 }
 
-// browser checks u owns bucket and returns a client acting as their web
-// account, so the gateway's policy confines it to their buckets too.
-func (p *Portal) browser(ctx context.Context, u User, bucket string) (*VGW, error) {
-	owns, err := p.ownsBucket(ctx, u, bucket)
+// browser checks u may reach bucket and returns a client acting as their
+// web account, so the gateway's policy confines it too, and what they may
+// do there.
+func (p *Portal) browser(ctx context.Context, u User, bucket string) (*VGW, Caps, error) {
+	v, err := p.Bucket(ctx, u, bucket, false)
 	if err != nil {
-		return nil, err
+		return nil, Caps{}, err
 	}
-	if !owns {
-		return nil, userErr("No such bucket.")
+	if v.Caps.None() {
+		return nil, Caps{}, userErr("You don't have access to the files in %s.", bucket)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	w, err := p.ensureWeb(ctx, u)
 	if err != nil {
-		return nil, err
+		return nil, Caps{}, err
 	}
-	return p.vgw.As(w.Access, w.Secret), nil
+	return p.vgw.As(w.Access, w.Secret), v.Caps, nil
 }
 
 // checkKey rejects object keys the browser shouldn't make: empty, too long,
@@ -601,9 +1115,12 @@ func (p *Portal) ListObjects(ctx context.Context, u User, bucket, prefix, token 
 	if err := checkPrefix(prefix); err != nil {
 		return nil, err
 	}
-	v, err := p.browser(ctx, u, bucket)
+	v, caps, err := p.browser(ctx, u, bucket)
 	if err != nil {
 		return nil, err
+	}
+	if !caps.Read {
+		return nil, errNoList
 	}
 	list, err := v.ListObjects(ctx, bucket, prefix, "/", token, pageSize)
 	if err != nil {
@@ -620,14 +1137,19 @@ func (p *Portal) ListObjects(ctx context.Context, u User, bucket, prefix, token 
 	return list, nil
 }
 
+var errNoList = userErr("You can upload here, but not see what's in it.")
+
 // GetObject returns the object's response for the caller to stream and close.
 func (p *Portal) GetObject(ctx context.Context, u User, bucket, key string) (*http.Response, error) {
 	if err := checkKey(key); err != nil {
 		return nil, err
 	}
-	v, err := p.browser(ctx, u, bucket)
+	v, caps, err := p.browser(ctx, u, bucket)
 	if err != nil {
 		return nil, err
+	}
+	if !caps.Read {
+		return nil, userErr("You can't download from %s.", bucket)
 	}
 	resp, err := v.GetObject(ctx, bucket, key)
 	if IsCode(err, "NoSuchKey") {
@@ -640,11 +1162,20 @@ func (p *Portal) PutObject(ctx context.Context, u User, bucket, key string, body
 	if err := checkKey(key); err != nil {
 		return err
 	}
-	v, err := p.browser(ctx, u, bucket)
+	v, caps, err := p.browser(ctx, u, bucket)
 	if err != nil {
 		return err
 	}
-	if err := v.PutObject(ctx, bucket, key, body, length, contentType); err != nil {
+	if !caps.Put && !caps.Create {
+		return userErr("You can't upload to %s.", bucket)
+	}
+	// Add-only access may create objects but not replace them.
+	createOnly := !caps.Put
+	err = v.PutObject(ctx, bucket, key, body, length, contentType, createOnly)
+	if IsCode(err, "PreconditionFailed") {
+		return userErr("%s already exists, and you can only add new files here.", key)
+	}
+	if err != nil {
 		return err
 	}
 	slog.Info("uploaded", "user", u.Name, "bucket", bucket, "key", key, "size", length)
@@ -668,9 +1199,12 @@ func (p *Portal) DeleteObject(ctx context.Context, u User, bucket, key string) e
 	if err := checkKey(key); err != nil {
 		return err
 	}
-	v, err := p.browser(ctx, u, bucket)
+	v, caps, err := p.browser(ctx, u, bucket)
 	if err != nil {
 		return err
+	}
+	if !caps.Delete {
+		return userErr("You can't delete files in %s.", bucket)
 	}
 	if err := v.DeleteObject(ctx, bucket, key); err != nil {
 		return err
@@ -688,9 +1222,12 @@ func (p *Portal) DeleteFolder(ctx context.Context, u User, bucket, prefix string
 	if err := checkPrefix(prefix); err != nil {
 		return 0, err
 	}
-	v, err := p.browser(ctx, u, bucket)
+	v, caps, err := p.browser(ctx, u, bucket)
 	if err != nil {
 		return 0, err
+	}
+	if !caps.Delete || !caps.Read {
+		return 0, userErr("You can't delete files in %s.", bucket)
 	}
 	deleted := 0
 	for {
@@ -718,5 +1255,11 @@ func keys[V any](m map[string]V) []string {
 	for k := range m {
 		out = append(out, k)
 	}
+	return out
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := keys(m)
+	sort.Strings(out)
 	return out
 }

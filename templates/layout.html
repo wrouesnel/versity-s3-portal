@@ -15,8 +15,9 @@
     <a class="brand" href="/"><span class="logo" aria-hidden="true"></span>{{.Title}}</a>
     {{if .User}}
     <nav class="links" aria-label="Main">
-      <a href="/">Buckets &amp; keys</a>
-      {{if .User.Admin}}<a href="/admin">Admin</a>{{end}}
+      <a href="/files"{{if eq .Tab "files"}} aria-current="page"{{end}}>Files</a>
+      <a href="/keys"{{if eq .Tab "keys"}} aria-current="page"{{end}}>Access keys</a>
+      {{if .User.Admin}}<a href="/admin"{{if eq .Tab "admin"}} aria-current="page"{{end}}>Admin</a>{{end}}
     </nav>
     <form method="post" action="/logout" class="who">
       <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -28,11 +29,11 @@
   </div>
   <div class="loading" aria-hidden="true"></div>
 </header>
-<main>
-<div id="flash">
+<main{{if eq .Tab "files"}} class="wide"{{end}}>
+{{if ne .Tab "files"}}<div id="flash">
 {{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
 {{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
-</div>
+</div>{{end}}
 {{end}}
 
 {{define "footer"}}
@@ -44,22 +45,26 @@
 {{define "grants"}}
 {{if .Buckets}}
 <table class="grants">
-  <thead><tr><th>Bucket</th><th>No access</th><th>Read only</th><th>Read &amp; write</th></tr></thead>
+  <thead><tr><th>Bucket</th><th>None</th>{{range perms}}<th>{{.Label}}</th>{{end}}</tr></thead>
   <tbody>
   {{$g := .Grants}}
-  {{range .Buckets}}{{$p := index $g .}}
+  {{range $b := .Buckets}}{{$p := index $g $b.Name}}
   <tr>
-    <td><code>{{.}}</code></td>
-    <td><input type="radio" name="perm_{{.}}" value="" aria-label="{{.}}: no access" {{if not $p}}checked{{end}}></td>
-    <td><input type="radio" name="perm_{{.}}" value="read" aria-label="{{.}}: read only" {{if eq $p "read"}}checked{{end}}></td>
-    <td><input type="radio" name="perm_{{.}}" value="readwrite" aria-label="{{.}}: read and write" {{if eq $p "readwrite"}}checked{{end}}></td>
+    <td><code>{{$b.Name}}</code>{{if $b.Via}}<div class="muted small">via {{join $b.Via ", "}}</div>{{end}}</td>
+    <td><input type="radio" name="perm_{{$b.Name}}" value="" aria-label="{{$b.Name}}: no access" {{if not $p}}checked{{end}}></td>
+    {{range perms}}
+    <td>{{if covers $b.Caps .}}<input type="radio" name="perm_{{$b.Name}}" value="{{.}}" aria-label="{{$b.Name}}: {{.Label}}" {{if eq $p .}}checked{{end}}>{{else if eq $p .}}<input type="radio" name="perm_{{$b.Name}}" value="{{.}}" aria-label="{{$b.Name}}: {{.Label}} (more than you have now)" checked title="More than you have now: limited until you get it back">{{else}}<span class="muted" title="More than you have">–</span>{{end}}</td>
+    {{end}}
   </tr>
   {{end}}
   </tbody>
 </table>
+<p class="muted small"><strong>Add only</strong> keys can read and add new files but never overwrite or delete; uploads must send <code>If-None-Match: *</code> and can't be multipart. <strong>Write only</strong> keys can upload but not list, read or delete.</p>
 {{else}}
 <p class="muted">You don't have any buckets yet. You can create the key now and give it access later.</p>
 {{end}}
 {{end}}
 
 {{define "perms"}}{{if .}}<ul class="perms">{{range $b, $p := .}}<li><code>{{$b}}</code> <span class="pill {{$p}}">{{permLabel $p}}</span></li>{{end}}</ul>{{else}}<span class="muted">no buckets</span>{{end}}{{end}}
+
+{{define "level"}}<span class="pill {{if .Delete}}readwrite{{else if or .Put .Create}}write{{end}}">{{capsLabel .}}</span>{{end}}

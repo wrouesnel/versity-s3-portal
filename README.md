@@ -2,8 +2,10 @@
 
 A small web app that lets people log in with their LDAP password or an
 OpenID Connect provider, make buckets on a [versitygw](https://github.com/versity/versitygw) gateway,
-browse, upload and download their files, and issue S3 access keys limited to
-buckets they own. Admins can see and revoke everyone's keys.
+browse, upload and download files, share buckets with groups, and issue S3
+access keys limited to the buckets and levels they pick. Access follows the
+directory: people who are disabled or leave a group lose it at once. Admins
+can see everyone, every bucket and every key.
 
 S3 signs every request with a secret the server must already hold, so S3
 clients can't log in with an LDAP password. Instead people log in here, and
@@ -14,9 +16,12 @@ they pick.
 
 - **Login:** search-then-bind.
   - A search account looks the user up with
-    `(&(objectClass=posixAccount)(uid=<user>))`, plus a `memberOf` term when
-    `ALLOWED_GROUP_DN` is set.
+    `(&(objectClass=posixAccount)(uid=<user>))`. They must have
+    `ALLOWED_GROUP_DN` in `memberOf` when it's set, and not be disabled (see
+    the directory below).
   - The portal then binds as the returned DN to check the password.
+  - Their groups are the first value of each `memberOf` DN, so
+    `ou=photos,ou=groups,dc=example,dc=com` is the group `photos`.
   - The user's uid and gid come from the entry's `uidNumber` and `gidNumber`.
   - Root (uid or gid 0) is always refused.
   - With glauth's PAM backend, the search account must be in its
@@ -41,38 +46,112 @@ they pick.
     It's read at login.
   - LDAP and OIDC users with the same username are the same person here.
     When both are on, make sure the names come from the same directory.
-- **Buckets:** each user has an owner account in the gateway, `owner.<user>`,
-  that owns their buckets. Its secret is random and thrown away, so nobody can
-  sign as it. The portal creates buckets through the admin API with that
-  account as owner, and deletes them over S3 as root, but only when they're
-  empty.
+- **Access levels.** Every grant, to a group or a key, is one of four
+  levels per bucket. The gateway enforces each one through the bucket
+  policy:
+
+  | Level | List and download | Upload | Overwrite | Delete |
+  | --- | --- | --- | --- | --- |
+  | Read & write | yes | yes | yes | yes |
+  | Add only | yes | new names only | no | no |
+  | Read only | yes | no | no | no |
+  | Write only | no | yes | yes | no |
+
+  - Add-only uploads are allowed only with `If-None-Match: *`, which the
+    gateway refuses with `412 PreconditionFailed` when the name exists, both
+    for PUT and copy. Clients must send that header: `aws s3api put-object
+    --if-none-match '*'` does, but `aws s3 cp` and rclone don't, and their
+    uploads are denied. The gateway doesn't check the condition on
+    multipart uploads, so add-only keys can't use them, and each upload is
+    a single PUT.
+  - Write-only is a drop box: uploads work (multipart too), but listing,
+    downloading and deleting don't.
+- **Buckets** belong to a person. Each person has an owner account in the
+  gateway, `owner.<user>`, whose secret is random and thrown away, so nobody
+  can sign as it. The portal creates buckets through the admin API with that
+  account as owner, and deletes them over S3 as root, only when they're
+  empty. The owner always has read & write.
+- **Group grants.** A bucket's owner, or an admin, can give any group a
+  level on it. Members see the bucket under "Shared with you", use the file
+  browser at their level, and can make keys up to it. Someone in several
+  groups with grants gets everything they allow together. Group names
+  compare without case. The settings page suggests the directory's groups
+  (`LDAP_GROUP_FILTER`, default `(objectClass=posixGroup)`) and any the
+  portal has seen in OIDC logins.
 - **Access keys:**
   - Each key is a gateway account with the `user` role and the person's uid
     and gid. With the posix backend's `--chuid --chgid`, everything a key
     writes is owned by that person on disk.
   - A `user` account can't create buckets. It reaches buckets only through
-    bucket policies, which the portal writes in full from its own records
-    every time a key changes.
-  - A key gets read-only or read & write access to each bucket. Bucket
-    policy, ACL and bucket configuration actions are never granted, so a key
-    can't widen its own access.
-- **File browser:** each user also has a web account in the gateway,
-  `web.<user>`, with their uid and gid. The portal creates it the first time
-  it's needed and gives it read & write in each of the user's bucket
-  policies, then browses, uploads, downloads and deletes as that account, so
-  uploads are owned by the user on disk and the gateway confines the account
-  to their buckets as well. Uploads and downloads stream through the portal,
-  so files of any size work; downloads are always served as attachments.
-- **Admins:** members of `ADMIN_GROUP_DN` get an admin page listing every key,
-  where they can revoke any key, all of one person's keys, or every key at
-  once (typing "revoke all" to confirm). Revoking keys leaves buckets, files
-  and the file browser alone. Membership is read at login.
-- **State:** `STATE_FILE` is a JSON file recording each key's owner, name and
-  bucket grants, and each web account's credentials. Key secrets live only in
-  the gateway.
-- **Reconcile at startup:** the portal drops keys the gateway no longer has
-  and grants on buckets the owner no longer owns. Then it rewrites the policy
-  of every bucket owned by an `owner.*` account.
+    bucket policies, which the portal writes in full from its records
+    whenever anything they depend on changes. Only policies that actually
+    changed are sent.
+  - A key asks for a level on each bucket, no more than its owner has when
+    it's made. What it gets is that level limited by what its owner has
+    *now*. When someone leaves a group, is disabled, or a grant is taken
+    away, their keys shrink or stop in the same moment, and come back if
+    the access does. The keys page marks a key that's limited this way.
+  - Bucket policy, ACL and bucket configuration actions are never granted,
+    so a key can't widen its own access.
+- **File browser:** each person also has a web account in the gateway,
+  `web.<user>`, with their uid and gid. Every bucket's policy gives it what
+  that person may do there, so the gateway confines the browser just as it
+  does keys, and uploads are owned by the person on disk. Uploads and
+  downloads stream through the portal, so files of any size work.
+  Downloads are always served as attachments.
+- **The directory.** With LDAP configured, the portal checks everyone who
+  has logged in with LDAP every `DIRECTORY_POLL_INTERVAL` (default 5m), and
+  once at startup. A person is disabled when:
+  - they're missing from the directory;
+  - they're out of `ALLOWED_GROUP_DN`;
+  - their entry is locked or expired: glauth's `accountStatus: inactive`,
+    389-ds's `nsAccountLock`, the password policy overlay's
+    `pwdAccountLockedTime`, or a past `shadowExpire`;
+  - they have uid or gid 0.
+
+  Disabling someone ends all their sessions, and drops their keys and web
+  account from every bucket policy. The keys still exist, but they reach
+  nothing. Their own buckets stay, and so do group members' access to
+  them. When the directory lists them again, everything comes back. Group
+  membership and admin rights are refreshed by the same check, so they
+  change without a new login.
+
+  People who log in with OIDC can't be checked this way. Their groups are
+  read at each login, and their sessions last at most 12 hours.
+- **Sessions** are kept server-side, in the state file. The cookie holds
+  only a signed session ID, so logging out, being disabled, or an admin's
+  "Log out" end a session everywhere at once. Admin rights and groups come
+  from the portal's current record of the person, not from when they
+  logged in.
+- **Admins** (members of `ADMIN_GROUP_DN`, or `OIDC_ADMIN_GROUP`) see
+  everyone the portal knows, with their status and groups, every bucket with
+  its owner and groups, and every key. They can:
+  - check someone or everyone against the directory now;
+  - log someone out;
+  - revoke a key, a person's keys, or every key (typing "revoke all");
+  - change any bucket's group grants, or delete it.
+
+  Admins don't get to read anyone's files by being admins.
+- **API.** For automation, such as a user-management job that disables
+  someone and wants them cut off at once, rather than at the next poll:
+  - `POST /api/directory/sync` checks everyone now and returns what changed;
+  - `POST /api/users/<name>/check` checks one person now and returns their
+    status;
+  - `GET /api/users/<name>` returns their status as last recorded.
+
+  Calls need `Authorization: Bearer <API_TOKEN>`, or an admin's session
+  with the CSRF token in `X-CSRF-Token`. For example:
+
+  ```sh
+  curl -fsS -X POST -H "Authorization: Bearer $(cat /run/secrets/s3-api-token)" \
+    https://s3.example.com/api/users/alice/check
+  ```
+- **State:** `STATE_FILE` is a JSON file with each key's owner, name and
+  grants, bucket group grants, everyone the portal knows, sessions, and web
+  account credentials. Key secrets live only in the gateway.
+- **Reconcile at startup:** the portal drops keys and web accounts the
+  gateway no longer has, and grants and settings for buckets that are gone.
+  Then it rewrites every bucket's policy.
 
 ### Gateway requirements
 
@@ -99,6 +178,9 @@ they pick.
 | `LDAP_BIND_DN`, `LDAP_BIND_PASSWORD` | The search account (or `LDAP_BIND_PASSWORD_FILE`) |
 | `ALLOWED_GROUP_DN` | Only users with this group in `memberOf` may log in (default: anyone in the directory) |
 | `ADMIN_GROUP_DN` | Users with this group in `memberOf` are admins (default: nobody) |
+| `LDAP_GROUP_FILTER` | Finds groups to suggest for grants (default `(objectClass=posixGroup)`) |
+| `DIRECTORY_POLL_INTERVAL` | How often to check people against LDAP (default `5m`, at least `10s`) |
+| `API_TOKEN` | At least 32 characters; enables bearer-token calls to `/api/` (or `API_TOKEN_FILE`) |
 | `OIDC_ISSUER` | The provider's issuer URL. Leave unset to turn off OIDC. |
 | `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | The portal's client at the provider (or `OIDC_CLIENT_SECRET_FILE`) |
 | `OIDC_REDIRECT_URL` | `https://<portal host>/auth/callback`, as registered at the provider |

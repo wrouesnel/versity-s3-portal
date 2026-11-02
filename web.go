@@ -2,9 +2,11 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -15,7 +17,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,11 +33,14 @@ type Server struct {
 	// Auth checks passwords; nil when only OIDC is configured.
 	Auth Authenticator
 	// OIDC is nil when only passwords are configured.
-	OIDC       *OIDCAuth
-	Sessions   *Sessions
-	Title      string
-	S3URL      string
-	Region     string
+	OIDC     *OIDCAuth
+	Sessions *Sessions
+	Title    string
+	S3URL    string
+	Region   string
+	// APIToken, when set, lets automation call /api/ with
+	// "Authorization: Bearer <token>".
+	APIToken   string
 	tmpl       *template.Template
 	failedWait time.Duration
 	// assetPrefix is /static/<hash of the static files>/, so they can be
@@ -47,18 +51,19 @@ type Server struct {
 func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions *Sessions, title, s3URL, region string) *Server {
 	assetPrefix := "/static/" + staticHash() + "/"
 	tmpl := template.Must(template.New("").Funcs(template.FuncMap{
-		"asset": func(name string) string { return assetPrefix + name },
-		"permLabel": func(p Perm) string {
-			if p == PermReadWrite {
-				return "read & write"
-			}
-			return "read only"
-		},
+		"asset":     func(name string) string { return assetPrefix + name },
+		"permLabel": func(p Perm) string { return p.Label() },
+		"capsLabel": capsLabel,
+		"perms":     func() []Perm { return Perms },
+		// covers says whether access c allows level p.
+		"covers":    func(c Caps, p Perm) bool { return c.Covers(p.Caps()) },
 		"humanSize": humanSize,
 		// within shows a key or folder relative to the folder being browsed.
 		"within": func(prefix, key string) string { return strings.TrimPrefix(key, prefix) },
 		// folderName is a subfolder's name without its trailing slash.
 		"folderName": func(prefix, key string) string { return strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/") },
+		"join":       strings.Join,
+		"browseURL":  browseURL,
 	}).ParseFS(templateFS, "templates/*.html"))
 	return &Server{
 		Portal: portal, Auth: auth, OIDC: oidcAuth, Sessions: sessions,
@@ -103,23 +108,39 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /auth/callback", s.oidcCallback)
 	}
 	mux.HandleFunc("POST /logout", s.authed(s.logout))
+	// Files: buckets on the left, the open one on the right.
+	mux.HandleFunc("GET /files", s.authedGet(s.files))
+	mux.HandleFunc("GET /browse", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/files?"+r.URL.RawQuery, http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("POST /buckets", s.authed(s.createBucket))
 	mux.HandleFunc("POST /buckets/delete", s.authed(s.deleteBucket))
-	mux.HandleFunc("GET /keys/new", s.authedGet(s.newKey))
-	mux.HandleFunc("POST /keys", s.authed(s.createKey))
-	mux.HandleFunc("GET /keys/edit", s.authedGet(s.editKey))
-	mux.HandleFunc("POST /keys/edit", s.authed(s.updateKey))
-	mux.HandleFunc("POST /keys/delete", s.authed(s.deleteKey))
-	mux.HandleFunc("GET /browse", s.authedGet(s.browse))
+	mux.HandleFunc("GET /buckets/settings", s.authedGet(s.bucketSettings))
+	mux.HandleFunc("POST /buckets/groups", s.authed(s.setGroupGrant))
 	mux.HandleFunc("GET /download", s.authedGet(s.download))
 	mux.HandleFunc("PUT /upload", s.authedUpload(s.upload))
 	mux.HandleFunc("POST /folders", s.authed(s.createFolder))
 	mux.HandleFunc("POST /folders/delete", s.authed(s.deleteFolder))
 	mux.HandleFunc("POST /objects/delete", s.authed(s.deleteObject))
+	// Keys.
+	mux.HandleFunc("GET /keys", s.authedGet(s.keysPage))
+	mux.HandleFunc("GET /keys/new", s.authedGet(s.newKey))
+	mux.HandleFunc("POST /keys", s.authed(s.createKey))
+	mux.HandleFunc("GET /keys/edit", s.authedGet(s.editKey))
+	mux.HandleFunc("POST /keys/edit", s.authed(s.updateKey))
+	mux.HandleFunc("POST /keys/delete", s.authed(s.deleteKey))
+	// Admin.
 	mux.HandleFunc("GET /admin", s.authedGet(s.admin(s.adminPage)))
 	mux.HandleFunc("POST /admin/revoke", s.authed(s.admin(s.adminRevoke)))
 	mux.HandleFunc("POST /admin/revoke-user", s.authed(s.admin(s.adminRevokeUser)))
 	mux.HandleFunc("POST /admin/revoke-all", s.authed(s.admin(s.adminRevokeAll)))
+	mux.HandleFunc("POST /admin/check", s.authed(s.admin(s.adminCheck)))
+	mux.HandleFunc("POST /admin/sync", s.authed(s.admin(s.adminSync)))
+	mux.HandleFunc("POST /admin/end-sessions", s.authed(s.admin(s.adminEndSessions)))
+	// API, for automation and scripts.
+	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
+	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
+	mux.HandleFunc("POST /api/users/{name}/check", s.api(s.apiCheckUser))
 	return securityHeaders(mux)
 }
 
@@ -148,22 +169,35 @@ type page struct {
 	CSRF    string
 	Error   string
 	Notice  string
-	Buckets []string
-	Keys    []KeyEntry
+	// Tab is the header tab to mark: files, keys or admin.
+	Tab string
+	// Buckets the user can reach, for the sidebar and key forms.
+	Buckets []BucketView
+	// Open is the bucket being shown.
+	Open *BucketView
+	Keys []KeyEntry
+	// KeyCaps is, for each key on the keys page, what it can do now.
+	KeyCaps map[string]map[string]Caps
 	// Key forms and the created-key page.
 	KeyAccess string
 	KeySecret string
 	KeyLabel  string
 	Grants    map[string]Perm
 	// The file browser.
-	Bucket    string
 	Prefix    string
 	Crumbs    []crumb
 	Listing   *ObjectList
 	NextToken string
-	// The admin page: every key, and everyone who has one.
-	AllKeys []KeyEntry
-	Owners  []string
+	// Bucket settings.
+	Settings  bool
+	GroupList []string
+	Grantees  map[string]Perm
+	// The admin page.
+	AllKeys    []KeyEntry
+	Owners     []string
+	People     []PersonStatus
+	AllBuckets []BucketSummary
+	Directory  bool
 }
 
 // crumb is one step of the path above the folder being browsed.
@@ -211,29 +245,7 @@ func (s *Server) authed(h handler) http.HandlerFunc {
 	})
 }
 
-// fail shows err on the dashboard: user errors as they are, anything else
-// logged and reported generically.
-func (s *Server) fail(w http.ResponseWriter, r *http.Request, sess *Session, err error) {
-	var ue *UserError
-	msg := "Something went wrong talking to the storage gateway. Try again, and ask for help if it keeps happening."
-	status := http.StatusInternalServerError
-	if errors.As(err, &ue) {
-		msg, status = ue.Msg, http.StatusBadRequest
-	} else {
-		slog.Error("request failed", "user", sess.User.Name, "path", r.URL.Path, "err", err)
-	}
-	s.dashboard(w, r, sess, status, msg, "")
-}
-
-func (s *Server) home(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.Sessions.Get(r)
-	if err != nil {
-		s.render(w, http.StatusOK, "login.html", page{})
-		return
-	}
-	notice, errMsg := takeFlash(w, r)
-	s.dashboard(w, r, sess, http.StatusOK, errMsg, notice)
-}
+const genericError = "Something went wrong talking to the storage gateway. Try again, and ask for help if it keeps happening."
 
 // userMessage is what to tell the user about err: user errors as they are,
 // anything else logged and reported generically.
@@ -243,26 +255,28 @@ func userMessage(r *http.Request, sess *Session, err error) string {
 		return ue.Msg
 	}
 	slog.Error("request failed", "user", sess.User.Name, "path", r.URL.Path, "err", err)
-	return "Something went wrong talking to the storage gateway. Try again, and ask for help if it keeps happening."
+	return genericError
 }
 
-func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, sess *Session, status int, errMsg, notice string) {
-	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
+func (s *Server) home(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.Sessions.Get(r)
 	if err != nil {
-		slog.Error("list buckets", "user", sess.User.Name, "err", err)
-		errMsg = "Couldn't reach the storage gateway."
-		status = http.StatusBadGateway
+		s.render(w, http.StatusOK, "login.html", page{})
+		return
 	}
-	s.render(w, status, "dashboard.html", page{
-		User: &sess.User, CSRF: sess.CSRF, Error: errMsg, Notice: notice,
-		Buckets: buckets, Keys: s.Portal.Keys(sess.User),
-	})
+	s.files(w, r, sess)
+}
+
+// base fills in what every logged-in page needs.
+func (s *Server) base(w http.ResponseWriter, r *http.Request, sess *Session, tab string) page {
+	notice, errMsg := takeFlash(w, r)
+	return page{User: &sess.User, CSRF: sess.CSRF, Notice: notice, Error: errMsg, Tab: tab}
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	username, password := r.PostFormValue("username"), r.PostFormValue("password")
-	user, err := s.Auth.Authenticate(username, password)
+	id, err := s.Auth.Authenticate(username, password)
 	if err != nil {
 		time.Sleep(s.failedWait)
 		msg := "Wrong username or password."
@@ -276,127 +290,34 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.render(w, status, "login.html", page{Error: msg})
 		return
 	}
-	if err := s.Sessions.Start(w, user); err != nil {
-		http.Error(w, "session error", http.StatusInternalServerError)
-		return
+	s.startSession(w, r, id, "ldap")
+}
+
+// startSession records a login and starts its session.
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, id Identity, source string) bool {
+	if _, err := s.Portal.Login(r.Context(), id, source); err != nil {
+		slog.Error("record login", "user", id.Name, "err", err)
+		s.render(w, http.StatusBadGateway, "login.html", page{Error: genericError})
+		return false
 	}
-	slog.Info("login", "user", user.Name, "remote", r.RemoteAddr)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	if err := s.Sessions.Start(w, id.Name); err != nil {
+		slog.Error("start session", "user", id.Name, "err", err)
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return false
+	}
+	slog.Info("login", "user", id.Name, "via", source, "remote", r.RemoteAddr)
+	if source == "ldap" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+	return true
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.Sessions.End(w)
+	s.Sessions.End(w, r)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (s *Server) createBucket(w http.ResponseWriter, r *http.Request, sess *Session) {
-	name := r.PostFormValue("name")
-	if err := s.Portal.CreateBucket(r.Context(), sess.User, name); err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	redirectNotice(w, r, "Created bucket "+name+".")
-}
-
-func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request, sess *Session) {
-	name := r.PostFormValue("name")
-	if err := s.Portal.DeleteBucket(r.Context(), sess.User, name); err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	redirectNotice(w, r, "Deleted bucket "+name+".")
-}
-
-// grantsFromForm reads a perm_<bucket> field for each of the user's buckets.
-func grantsFromForm(r *http.Request, buckets []string) map[string]Perm {
-	grants := map[string]Perm{}
-	for _, b := range buckets {
-		if p := Perm(r.PostFormValue("perm_" + b)); p.Valid() {
-			grants[b] = p
-		}
-	}
-	return grants
-}
-
-func (s *Server) keyForm(w http.ResponseWriter, r *http.Request, sess *Session, name string, status int, p page) {
-	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
-	if err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	p.User, p.CSRF, p.Buckets = &sess.User, sess.CSRF, buckets
-	if p.Grants == nil {
-		p.Grants = map[string]Perm{}
-	}
-	s.render(w, status, name, p)
-}
-
-func (s *Server) newKey(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.keyForm(w, r, sess, "key_new.html", http.StatusOK, page{})
-}
-
-func (s *Server) createKey(w http.ResponseWriter, r *http.Request, sess *Session) {
-	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
-	if err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	label := r.PostFormValue("label")
-	grants := grantsFromForm(r, buckets)
-	access, secret, err := s.Portal.CreateKey(r.Context(), sess.User, label, grants)
-	if err != nil {
-		var ue *UserError
-		if errors.As(err, &ue) {
-			s.keyForm(w, r, sess, "key_new.html", http.StatusBadRequest, page{Error: ue.Msg, KeyLabel: label, Grants: grants})
-			return
-		}
-		s.fail(w, r, sess, err)
-		return
-	}
-	s.render(w, http.StatusOK, "key_created.html", page{
-		User: &sess.User, CSRF: sess.CSRF,
-		KeyAccess: access, KeySecret: secret, KeyLabel: label, Grants: grants,
-		Buckets: sortedKeys(grants),
-	})
-}
-
-func (s *Server) editKey(w http.ResponseWriter, r *http.Request, sess *Session) {
-	access := r.URL.Query().Get("access")
-	k, err := s.Portal.Key(sess.User, access)
-	if err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	s.keyForm(w, r, sess, "key_edit.html", http.StatusOK, page{KeyAccess: access, KeyLabel: k.Label, Grants: k.Buckets})
-}
-
-func (s *Server) updateKey(w http.ResponseWriter, r *http.Request, sess *Session) {
-	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
-	if err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	access, label := r.PostFormValue("access"), r.PostFormValue("label")
-	grants := grantsFromForm(r, buckets)
-	if err := s.Portal.UpdateKey(r.Context(), sess.User, access, label, grants); err != nil {
-		var ue *UserError
-		if errors.As(err, &ue) {
-			s.keyForm(w, r, sess, "key_edit.html", http.StatusBadRequest, page{Error: ue.Msg, KeyAccess: access, KeyLabel: label, Grants: grants})
-			return
-		}
-		s.fail(w, r, sess, err)
-		return
-	}
-	redirectNotice(w, r, "Updated key "+label+".")
-}
-
-func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request, sess *Session) {
-	if err := s.Portal.DeleteKey(r.Context(), sess.User, r.PostFormValue("access")); err != nil {
-		s.fail(w, r, sess, err)
-		return
-	}
-	redirectNotice(w, r, "Revoked the key.")
-}
+// ------------------------------------------------------------------- files
 
 // browseURL is the file browser's page for a folder.
 func browseURL(bucket, prefix string) string {
@@ -404,7 +325,7 @@ func browseURL(bucket, prefix string) string {
 	if prefix != "" {
 		q.Set("prefix", prefix)
 	}
-	return "/browse?" + q.Encode()
+	return "/files?" + q.Encode()
 }
 
 // parentPrefix is the folder a key is in.
@@ -427,27 +348,102 @@ func crumbs(prefix string) []crumb {
 	return out
 }
 
-func (s *Server) browse(w http.ResponseWriter, r *http.Request, sess *Session) {
+// sidebar fills in the bucket list, and the open bucket if it's in it.
+func (s *Server) sidebar(r *http.Request, sess *Session, p *page, open string) error {
+	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
+	if err != nil {
+		return err
+	}
+	p.Buckets = buckets
+	if open != "" {
+		v, err := s.Portal.Bucket(r.Context(), sess.User, open, false)
+		if err != nil {
+			return err
+		}
+		p.Open = &v
+	}
+	return nil
+}
+
+func (s *Server) files(w http.ResponseWriter, r *http.Request, sess *Session) {
 	q := r.URL.Query()
 	bucket, prefix := q.Get("bucket"), q.Get("prefix")
-	notice, errMsg := takeFlash(w, r)
-	p := page{
-		User: &sess.User, CSRF: sess.CSRF, Notice: notice, Error: errMsg,
-		Bucket: bucket, Prefix: prefix, Crumbs: crumbs(prefix),
-	}
-	list, err := s.Portal.ListObjects(r.Context(), sess.User, bucket, prefix, q.Get("token"))
-	if err != nil {
+	p := s.base(w, r, sess, "files")
+	if err := s.sidebar(r, sess, &p, bucket); err != nil {
 		var ue *UserError
-		if errors.As(err, &ue) && ue.Msg == "No such bucket." {
-			redirectFlash(w, r, "/", "", ue.Msg)
+		if errors.As(err, &ue) {
+			redirectFlash(w, r, "/files", "", ue.Msg)
 			return
 		}
 		p.Error = userMessage(r, sess, err)
-		s.render(w, http.StatusBadGateway, "browse.html", p)
+		s.render(w, http.StatusBadGateway, "files.html", p)
 		return
 	}
-	p.Listing, p.NextToken = list, list.NextToken
-	s.render(w, http.StatusOK, "browse.html", p)
+	if p.Open == nil || p.Open.Caps.None() {
+		s.render(w, http.StatusOK, "files.html", p)
+		return
+	}
+	p.Prefix, p.Crumbs = prefix, crumbs(prefix)
+	if p.Open.Caps.Read {
+		list, err := s.Portal.ListObjects(r.Context(), sess.User, bucket, prefix, q.Get("token"))
+		if err != nil {
+			p.Error = userMessage(r, sess, err)
+			s.render(w, http.StatusBadGateway, "files.html", p)
+			return
+		}
+		p.Listing, p.NextToken = list, list.NextToken
+	}
+	s.render(w, http.StatusOK, "files.html", p)
+}
+
+func (s *Server) createBucket(w http.ResponseWriter, r *http.Request, sess *Session) {
+	name := r.PostFormValue("name")
+	if err := s.Portal.CreateBucket(r.Context(), sess.User, name); err != nil {
+		redirectFlash(w, r, "/files", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, browseURL(name, ""), "Created bucket "+name+".", "")
+}
+
+func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request, sess *Session) {
+	name := r.PostFormValue("name")
+	if err := s.Portal.DeleteBucket(r.Context(), sess.User, name); err != nil {
+		redirectFlash(w, r, "/buckets/settings?bucket="+url.QueryEscape(name), "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/files", "Deleted bucket "+name+".", "")
+}
+
+func (s *Server) bucketSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket := r.URL.Query().Get("bucket")
+	p := s.base(w, r, sess, "files")
+	if err := s.sidebar(r, sess, &p, bucket); err != nil {
+		redirectFlash(w, r, "/files", "", userMessage(r, sess, err))
+		return
+	}
+	if !p.Open.Manage {
+		redirectFlash(w, r, browseURL(bucket, ""), "", "Only the bucket's owner or an admin can change its settings.")
+		return
+	}
+	p.Settings = true
+	p.Grantees = s.Portal.store.BucketMeta(bucket).Groups
+	p.GroupList = s.Portal.Groups()
+	s.render(w, http.StatusOK, "files.html", p)
+}
+
+func (s *Server) setGroupGrant(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket, group := r.PostFormValue("bucket"), r.PostFormValue("group")
+	perm := Perm(r.PostFormValue("perm"))
+	back := "/buckets/settings?bucket=" + url.QueryEscape(bucket)
+	if err := s.Portal.SetGroupGrant(r.Context(), sess.User, bucket, group, perm); err != nil {
+		redirectFlash(w, r, back, "", userMessage(r, sess, err))
+		return
+	}
+	if perm == "" {
+		redirectFlash(w, r, back, "Removed "+group+"'s access.", "")
+		return
+	}
+	redirectFlash(w, r, back, "Gave "+group+" "+perm.Label()+" access.", "")
 }
 
 // unlimited lifts the server's read and write deadlines for a request that
@@ -540,7 +536,128 @@ func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request, sess *Sess
 	redirectFlash(w, r, browseURL(bucket, prefix), fmt.Sprintf("Deleted folder %s and %d files in it.", path.Base(folder), n), "")
 }
 
-// admin restricts h to members of the admin group.
+// -------------------------------------------------------------------- keys
+
+func (s *Server) keysPage(w http.ResponseWriter, r *http.Request, sess *Session) {
+	p := s.base(w, r, sess, "keys")
+	p.Keys = s.Portal.Keys(sess.User)
+	p.KeyCaps = map[string]map[string]Caps{}
+	for _, k := range p.Keys {
+		p.KeyCaps[k.Access] = s.Portal.KeyAccess(r.Context(), k.Key)
+	}
+	s.render(w, http.StatusOK, "keys.html", p)
+}
+
+// grantsFromForm reads a perm_<bucket> field for each bucket the user can
+// reach, and keeps grants the key already had on buckets they no longer
+// can (those are shown, and kept unless changed).
+func grantsFromForm(r *http.Request, buckets []BucketView, had map[string]Perm) map[string]Perm {
+	grants := map[string]Perm{}
+	seen := map[string]bool{}
+	for _, b := range buckets {
+		seen[b.Name] = true
+		if p := Perm(r.PostFormValue("perm_" + b.Name)); p.Valid() {
+			grants[b.Name] = p
+		}
+	}
+	for b, p := range had {
+		if !seen[b] && r.PostFormValue("perm_"+b) == string(p) {
+			grants[b] = p
+		}
+	}
+	return grants
+}
+
+func (s *Server) keyForm(w http.ResponseWriter, r *http.Request, sess *Session, name string, status int, p page) {
+	base := s.base(w, r, sess, "keys")
+	p.User, p.CSRF, p.Tab = base.User, base.CSRF, base.Tab
+	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
+	if err != nil {
+		p.Error = userMessage(r, sess, err)
+		s.render(w, http.StatusBadGateway, name, p)
+		return
+	}
+	p.Buckets = buckets
+	if p.Grants == nil {
+		p.Grants = map[string]Perm{}
+	}
+	s.render(w, status, name, p)
+}
+
+func (s *Server) newKey(w http.ResponseWriter, r *http.Request, sess *Session) {
+	s.keyForm(w, r, sess, "key_new.html", http.StatusOK, page{})
+}
+
+func (s *Server) createKey(w http.ResponseWriter, r *http.Request, sess *Session) {
+	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
+	if err != nil {
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	label := r.PostFormValue("label")
+	grants := grantsFromForm(r, buckets, nil)
+	access, secret, err := s.Portal.CreateKey(r.Context(), sess.User, label, grants)
+	if err != nil {
+		var ue *UserError
+		if errors.As(err, &ue) {
+			s.keyForm(w, r, sess, "key_new.html", http.StatusBadRequest, page{Error: ue.Msg, KeyLabel: label, Grants: grants})
+			return
+		}
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	s.render(w, http.StatusOK, "key_created.html", page{
+		User: &sess.User, CSRF: sess.CSRF, Tab: "keys",
+		KeyAccess: access, KeySecret: secret, KeyLabel: label, Grants: grants,
+	})
+}
+
+func (s *Server) editKey(w http.ResponseWriter, r *http.Request, sess *Session) {
+	access := r.URL.Query().Get("access")
+	k, err := s.Portal.Key(sess.User, access)
+	if err != nil {
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	s.keyForm(w, r, sess, "key_edit.html", http.StatusOK, page{KeyAccess: access, KeyLabel: k.Label, Grants: k.Buckets})
+}
+
+func (s *Server) updateKey(w http.ResponseWriter, r *http.Request, sess *Session) {
+	access, label := r.PostFormValue("access"), r.PostFormValue("label")
+	k, err := s.Portal.Key(sess.User, access)
+	if err != nil {
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	buckets, err := s.Portal.Buckets(r.Context(), sess.User)
+	if err != nil {
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	grants := grantsFromForm(r, buckets, k.Buckets)
+	if err := s.Portal.UpdateKey(r.Context(), sess.User, access, label, grants); err != nil {
+		var ue *UserError
+		if errors.As(err, &ue) {
+			s.keyForm(w, r, sess, "key_edit.html", http.StatusBadRequest, page{Error: ue.Msg, KeyAccess: access, KeyLabel: label, Grants: grants})
+			return
+		}
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/keys", "Updated key "+label+".", "")
+}
+
+func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if err := s.Portal.DeleteKey(r.Context(), sess.User, r.PostFormValue("access")); err != nil {
+		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/keys", "Revoked the key.", "")
+}
+
+// ------------------------------------------------------------------- admin
+
+// admin restricts h to admins.
 func (s *Server) admin(h handler) handler {
 	return func(w http.ResponseWriter, r *http.Request, sess *Session) {
 		if !sess.User.Admin {
@@ -552,18 +669,23 @@ func (s *Server) admin(h handler) handler {
 }
 
 func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session) {
-	notice, errMsg := takeFlash(w, r)
-	all := s.Portal.AllKeys()
-	var owners []string
-	for _, e := range all {
-		if len(owners) == 0 || owners[len(owners)-1] != e.Owner {
-			owners = append(owners, e.Owner)
+	p := s.base(w, r, sess, "admin")
+	p.AllKeys = s.Portal.AllKeys()
+	for _, e := range p.AllKeys {
+		if len(p.Owners) == 0 || p.Owners[len(p.Owners)-1] != e.Owner {
+			p.Owners = append(p.Owners, e.Owner)
 		}
 	}
-	s.render(w, http.StatusOK, "admin.html", page{
-		User: &sess.User, CSRF: sess.CSRF, Notice: notice, Error: errMsg,
-		AllKeys: all, Owners: owners,
-	})
+	for _, name := range sortedKeys(s.Portal.store.People()) {
+		p.People = append(p.People, s.Portal.Status(name))
+	}
+	p.Directory = s.Portal.dir != nil
+	buckets, err := s.Portal.AllBuckets(r.Context())
+	if err != nil {
+		p.Error = userMessage(r, sess, err)
+	}
+	p.AllBuckets = buckets
+	s.render(w, http.StatusOK, "admin.html", p)
 }
 
 func (s *Server) adminRevoke(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -605,6 +727,94 @@ func (s *Server) adminRevokeAll(w http.ResponseWriter, r *http.Request, sess *Se
 	redirectFlash(w, r, "/admin", fmt.Sprintf("Revoked all %d keys.", n), "")
 }
 
+func (s *Server) adminCheck(w http.ResponseWriter, r *http.Request, sess *Session) {
+	name := r.PostFormValue("user")
+	st, err := s.Portal.CheckPerson(r.Context(), name)
+	if err != nil {
+		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		return
+	}
+	msg := name + " is active."
+	if st.Disabled {
+		msg = fmt.Sprintf("%s is disabled (%s): their keys are suspended and they're logged out.", name, st.Reason)
+	}
+	redirectFlash(w, r, "/admin", msg, "")
+}
+
+func (s *Server) adminSync(w http.ResponseWriter, r *http.Request, sess *Session) {
+	report, err := s.Portal.SyncDirectory(r.Context())
+	if err != nil {
+		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/admin", fmt.Sprintf("Checked %d people against the directory: %d changed, %d disabled.", report.Checked, len(report.Changed), report.Disabled), "")
+}
+
+func (s *Server) adminEndSessions(w http.ResponseWriter, r *http.Request, sess *Session) {
+	name := r.PostFormValue("user")
+	n, err := s.Portal.EndSessions(sess.User, name)
+	if err != nil {
+		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/admin", fmt.Sprintf("Logged %s out of %d sessions.", name, n), "")
+}
+
+// --------------------------------------------------------------------- API
+
+// api allows a request with the API token as a bearer token, or from an
+// admin's session with the CSRF token in X-CSRF-Token. It answers in JSON.
+func (s *Server) api(h func(r *http.Request) (any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		allowed, who := false, ""
+		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+			allowed = s.APIToken != "" && subtle.ConstantTimeCompare([]byte(bearer), []byte(s.APIToken)) == 1
+			who = "token"
+		} else if sess, err := s.Sessions.Get(r); err == nil && sess.User.Admin {
+			allowed = r.Method == http.MethodGet || r.Header.Get("X-CSRF-Token") == sess.CSRF
+			who = sess.User.Name
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !allowed {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			return
+		}
+		out, err := h(r)
+		if err != nil {
+			status := http.StatusBadGateway
+			msg := genericError
+			var ue *UserError
+			if errors.As(err, &ue) {
+				status, msg = http.StatusBadRequest, ue.Msg
+			} else {
+				slog.Error("api", "path", r.URL.Path, "by", who, "err", err)
+			}
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]any{"error": msg, "result": out})
+			return
+		}
+		if r.Method != http.MethodGet {
+			slog.Info("api", "path", r.URL.Path, "by", who)
+		}
+		json.NewEncoder(w).Encode(out)
+	}
+}
+
+func (s *Server) apiSync(r *http.Request) (any, error) {
+	return s.Portal.SyncDirectory(r.Context())
+}
+
+func (s *Server) apiUser(r *http.Request) (any, error) {
+	return s.Portal.Status(r.PathValue("name")), nil
+}
+
+func (s *Server) apiCheckUser(r *http.Request) (any, error) {
+	return s.Portal.CheckPerson(r.Context(), r.PathValue("name"))
+}
+
+// ------------------------------------------------------------------ helpers
+
 func humanSize(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -619,11 +829,6 @@ func humanSize(n int64) string {
 }
 
 const flashCookie = "s3portal_flash"
-
-// redirectNotice shows notice on the dashboard after the redirect.
-func redirectNotice(w http.ResponseWriter, r *http.Request, notice string) {
-	redirectFlash(w, r, "/", notice, "")
-}
 
 // redirectFlash shows a notice or an error on the page after the redirect.
 // They go in a cookie rather than the URL so links can't put words on the
@@ -655,10 +860,4 @@ func takeFlash(w http.ResponseWriter, r *http.Request) (notice, errMsg string) {
 		return "", string(msg)
 	}
 	return string(msg), ""
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := keys(m)
-	sort.Strings(out)
-	return out
 }

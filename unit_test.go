@@ -12,108 +12,231 @@ import (
 	"github.com/go-ldap/ldap/v3"
 )
 
+func TestCaps(t *testing.T) {
+	rw, ao, ro, wo := PermReadWrite.Caps(), PermCreateOnly.Caps(), PermRead.Caps(), PermWriteOnly.Caps()
+	// Who covers whom: read ⊂ add-only ⊂ read & write, write-only ⊂ read & write.
+	for _, c := range []struct {
+		a, b Caps
+		want bool
+	}{
+		{rw, ao, true}, {rw, ro, true}, {rw, wo, true},
+		{ao, ro, true}, {ao, wo, false}, {ao, rw, false},
+		{wo, ro, false}, {wo, ao, false}, {ro, ao, false},
+		{ro.Union(wo), ao, true}, {ro.Union(wo), rw, false},
+	} {
+		if got := c.a.Covers(c.b); got != c.want {
+			t.Errorf("%s covers %s: got %v", capsLabel(c.a), capsLabel(c.b), got)
+		}
+	}
+	if got := rw.Intersect(ro.Union(wo)); got != (Caps{Read: true, Put: true}) {
+		t.Errorf("read & write limited to read + write-only: %+v", got)
+	}
+	if got := wo.Intersect(ao); got != (Caps{Create: true}) {
+		t.Errorf("write-only limited to add-only: %+v", got)
+	}
+	if got := ao.Intersect(Caps{}); got.Any() {
+		t.Errorf("anything limited to nothing: %+v", got)
+	}
+	for _, p := range Perms {
+		if capsLabel(p.Caps()) != p.Label() {
+			t.Errorf("%s labels as %s", p, capsLabel(p.Caps()))
+		}
+	}
+}
+
 func TestBucketPolicy(t *testing.T) {
 	if BucketPolicy("b", nil) != nil {
 		t.Fatal("expected no policy without grants")
 	}
 	var doc policyDocument
-	if err := json.Unmarshal(BucketPolicy("b", map[string]Perm{"R": PermRead, "W": PermReadWrite}), &doc); err != nil {
+	if err := json.Unmarshal(BucketPolicy("b", map[string]Caps{
+		"R": PermRead.Caps(), "W": PermReadWrite.Caps(), "A": PermCreateOnly.Caps(), "D": PermWriteOnly.Caps(),
+	}), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Statement) != 4 {
-		t.Fatalf("want 4 statements, got %d", len(doc.Statement))
-	}
+	statements := map[string]policyStatement{}
 	for _, st := range doc.Statement {
+		statements[st.Sid] = st
 		for _, a := range st.Action {
 			switch a {
-			case "s3:*", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketAcl", "s3:DeleteBucket":
+			case "s3:*", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketAcl", "s3:DeleteBucket", "s3:PutObjectAcl":
 				t.Errorf("statement %s grants %s", st.Sid, a)
 			}
 		}
-		if (st.Sid == "WriteObjects" || st.Sid == "WriteBucket") && len(st.Principal["AWS"]) != 1 {
-			t.Errorf("%s should only name the writer: %v", st.Sid, st.Principal["AWS"])
+	}
+	names := func(sid string) string { return strings.Join(statements[sid].Principal["AWS"], ",") }
+	for sid, want := range map[string]string{
+		"ReadBucket": "A,R,W", "ReadObjects": "A,R,W",
+		"UploadObjects": "A,D,W", "PutObjects": "D,W",
+		"CreateObjects": "A", "DeleteObjects": "W",
+	} {
+		if got := names(sid); got != want {
+			t.Errorf("%s names %s, want %s", sid, got, want)
 		}
 	}
-	var readOnly policyDocument
-	json.Unmarshal(BucketPolicy("b", map[string]Perm{"R": PermRead}), &readOnly)
-	if len(readOnly.Statement) != 2 {
-		t.Fatalf("read-only policy should have 2 statements, got %d", len(readOnly.Statement))
+	create := statements["CreateObjects"]
+	if create.Condition["StringEquals"]["s3:if-none-match"] != "*" || strings.Join(create.Action, ",") != "s3:PutObject" {
+		t.Errorf("add-only statement: %+v", create)
 	}
 }
 
-func TestSessions(t *testing.T) {
-	s := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
-	rec := httptest.NewRecorder()
-	if err := s.Start(rec, User{Name: "alice", UID: 1001, GID: 1001}); err != nil {
+func testStore(t *testing.T) *Store {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	cookie := rec.Result().Cookies()[0]
+	return s
+}
 
-	req := httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(cookie)
-	sess, err := s.Get(req)
-	if err != nil || sess.User.Name != "alice" || sess.CSRF == "" {
+func testSessions(t *testing.T, store *Store, people ...string) *Sessions {
+	for _, name := range people {
+		store.PutPerson(name, &Person{UID: 1001, GID: 1001, Source: "ldap"})
+	}
+	return &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour, Store: store}
+}
+
+func loginCookie(t *testing.T, s *Sessions, name string) *http.Cookie {
+	rec := httptest.NewRecorder()
+	if err := s.Start(rec, name); err != nil {
+		t.Fatal(err)
+	}
+	return rec.Result().Cookies()[0]
+}
+
+func TestSessions(t *testing.T) {
+	store := testStore(t)
+	s := testSessions(t, store, "alice")
+	cookie := loginCookie(t, s, "alice")
+	get := func(c *http.Cookie, s *Sessions) (*Session, error) {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(c)
+		return s.Get(req)
+	}
+	sess, err := get(cookie, s)
+	if err != nil || sess.User.Name != "alice" || sess.User.UID != 1001 || sess.CSRF == "" {
 		t.Fatalf("valid session rejected: %v %+v", err, sess)
 	}
 
 	tampered := *cookie
 	tampered.Value = "x" + cookie.Value[1:]
-	req = httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(&tampered)
-	if _, err := s.Get(req); err == nil {
+	if _, err := get(&tampered, s); err == nil {
 		t.Fatal("tampered session accepted")
 	}
-
-	other := &Sessions{Key: []byte("fedcba9876543210fedcba9876543210"), TTL: time.Hour}
-	req = httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(cookie)
-	if _, err := other.Get(req); err == nil {
+	other := &Sessions{Key: []byte("fedcba9876543210fedcba9876543210"), TTL: time.Hour, Store: store}
+	if _, err := get(cookie, other); err == nil {
 		t.Fatal("session signed with another key accepted")
 	}
 
-	expired := &Sessions{Key: s.Key, TTL: -time.Minute}
-	rec = httptest.NewRecorder()
-	expired.Start(rec, User{Name: "alice"})
-	req = httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(rec.Result().Cookies()[0])
-	if _, err := s.Get(req); err == nil {
+	// Admin rights come from the person now, not from login time.
+	store.PutPerson("alice", &Person{UID: 1001, GID: 1001, Source: "ldap", Admin: true})
+	if sess, _ := get(cookie, s); sess == nil || !sess.User.Admin {
+		t.Fatal("admin rights didn't follow the person")
+	}
+	// Disabling the person ends the session at once.
+	store.PutPerson("alice", &Person{UID: 1001, GID: 1001, Source: "ldap", Disabled: true})
+	if _, err := get(cookie, s); err == nil {
+		t.Fatal("disabled person's session accepted")
+	}
+	store.PutPerson("alice", &Person{UID: 1001, GID: 1001, Source: "ldap"})
+	// Logging out ends the session server-side, so a copy of the cookie
+	// stops working too.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/logout", nil)
+	req.AddCookie(cookie)
+	s.End(rec, req)
+	if _, err := get(cookie, s); err == nil {
+		t.Fatal("session survived logout")
+	}
+	// Ending all of someone's sessions.
+	c1, c2 := loginCookie(t, s, "alice"), loginCookie(t, s, "alice")
+	if n, _ := store.EndSessions("alice"); n != 2 {
+		t.Fatalf("ended %d sessions", n)
+	}
+	if _, err := get(c1, s); err == nil {
+		t.Fatal("ended session accepted")
+	}
+	_ = c2
+
+	expired := &Sessions{Key: s.Key, TTL: -time.Minute, Store: store}
+	if _, err := get(loginCookie(t, expired, "alice"), s); err == nil {
 		t.Fatal("expired session accepted")
 	}
 }
 
-func TestLDAPUser(t *testing.T) {
-	a := &LDAPAuth{BaseDN: "dc=example,dc=com", AllowedGroup: "ou=s3-users,ou=groups,dc=example,dc=com"}
-	want := "(&(objectClass=posixAccount)(uid=alice)(memberOf=ou=s3-users,ou=groups,dc=example,dc=com))"
-	if got := a.userFilter("alice"); got != want {
-		t.Fatalf("filter %s, want %s", got, want)
+func TestLDAPEntries(t *testing.T) {
+	a := &LDAPAuth{
+		AllowedGroup: "ou=s3-users,ou=groups,dc=example,dc=com",
+		AdminGroup:   "ou=s3-admin,ou=groups,dc=example,dc=com",
+		now:          func() time.Time { return time.Unix(20000*86400, 0) },
 	}
-
-	entry := func(uid, uidNumber, gidNumber string) *ldap.Entry {
-		return ldap.NewEntry("cn="+uid+",ou="+uid+",ou=users,dc=example,dc=com", map[string][]string{
-			"uid": {uid}, "uidNumber": {uidNumber}, "gidNumber": {gidNumber},
-		})
+	if got := userFilter("al*ce"); got != `(&(objectClass=posixAccount)(uid=al\2ace))` {
+		t.Fatalf("filter %s", got)
 	}
-	u, err := userFromEntry("alice", entry("alice", "1001", "1001"))
-	if err != nil || u.UID != 1001 || u.GID != 1001 || u.Name != "alice" {
-		t.Fatalf("alice: %+v %v", u, err)
+	entry := func(attrs map[string][]string) *ldap.Entry {
+		base := map[string][]string{
+			"uid": {"alice"}, "uidNumber": {"1001"}, "gidNumber": {"1001"},
+			"memberOf": {"ou=s3-users,ou=groups,dc=example,dc=com", "OU=S3-Admin,ou=groups,dc=example,dc=com", "ou=photos,ou=groups,dc=example,dc=com"},
+		}
+		for k, v := range attrs {
+			base[k] = v
+		}
+		return ldap.NewEntry("cn=alice,ou=users,dc=example,dc=com", base)
 	}
-	if _, err := userFromEntry("root", entry("root", "0", "0")); err != ErrBadCredentials {
-		t.Fatalf("root should be refused, got %v", err)
+	d, err := a.entry(entry(nil))
+	if err != nil || d.Disabled || !d.Admin || d.UID != 1001 || strings.Join(d.Groups, ",") != "S3-Admin,photos,s3-users" {
+		t.Fatalf("alice: %+v %v", d, err)
 	}
-	if _, err := userFromEntry("bob", entry("bob", "1002", "0")); err != ErrBadCredentials {
-		t.Fatalf("gid 0 should be refused, got %v", err)
+	for name, attrs := range map[string]map[string][]string{
+		"not allowed":    {"memberOf": {"ou=photos,ou=groups,dc=example,dc=com"}},
+		"glauth locked":  {"accountStatus": {"inactive"}},
+		"389 locked":     {"nsAccountLock": {"TRUE"}},
+		"ppolicy locked": {"pwdAccountLockedTime": {"20260101000000Z"}},
+		"expired":        {"shadowExpire": {"19999"}},
+		"root":           {"uidNumber": {"0"}},
+	} {
+		d, err := a.entry(entry(attrs))
+		if err != nil || !d.Disabled || d.Admin || d.Reason == "" {
+			t.Errorf("%s: want disabled, got %+v %v", name, d, err)
+		}
 	}
-	if _, err := userFromEntry("alice", entry("bob", "1002", "1002")); err == nil {
-		t.Fatal("an entry for someone else should be an error")
+	for name, attrs := range map[string]map[string][]string{
+		"expires later": {"shadowExpire": {"20001"}},
+		"never expires": {"shadowExpire": {"-1"}},
+		"active":        {"accountStatus": {"active"}},
+	} {
+		if d, err := a.entry(entry(attrs)); err != nil || d.Disabled {
+			t.Errorf("%s: want enabled, got %+v %v", name, d, err)
+		}
 	}
-	if _, err := userFromEntry("alice", entry("alice", "", "1001")); err == nil {
+	if _, err := a.entry(entry(map[string][]string{"uidNumber": {""}})); err == nil {
 		t.Fatal("an entry without uidNumber should be an error")
 	}
-
 	for _, name := range []string{"Bad Name", "a,cn=admin", "*", ""} {
 		if _, err := a.Authenticate(name, "pw"); err != ErrBadCredentials {
 			t.Errorf("%q: want bad credentials before any LDAP call, got %v", name, err)
 		}
+	}
+	if g := groupName("ou=s3-users,ou=groups,dc=example,dc=com"); g != "s3-users" {
+		t.Errorf("groupName: %q", g)
+	}
+}
+
+func TestAccess(t *testing.T) {
+	meta := &BucketMeta{Groups: map[string]Perm{"photos": PermRead, "uploaders": PermWriteOnly, "archivists": PermCreateOnly}}
+	alice := &Person{Groups: []string{"Photos", "uploaders"}}
+	if c, via := access("alice", alice, "owner.alice", meta); c != PermReadWrite.Caps() || via != nil {
+		t.Errorf("owner: %+v %v", c, via)
+	}
+	c, via := access("alice", alice, "owner.bob", meta)
+	if c != (Caps{Read: true, Put: true}) || strings.Join(via, ",") != "photos,uploaders" {
+		t.Errorf("member of two groups: %+v %v", c, via)
+	}
+	if c, _ := access("carol", &Person{}, "owner.bob", meta); c.Any() {
+		t.Errorf("outsider: %+v", c)
+	}
+	alice.Disabled = true
+	if c, _ := access("alice", alice, "owner.alice", meta); c.Any() {
+		t.Errorf("disabled owner: %+v", c)
 	}
 }
 
@@ -126,6 +249,8 @@ func TestStore(t *testing.T) {
 	s.Put("K1", &Key{Owner: "alice", Label: "one", Created: time.Unix(1, 0), Buckets: map[string]Perm{"a": PermRead}})
 	s.Put("K2", &Key{Owner: "alice", Label: "two", Created: time.Unix(2, 0), Buckets: map[string]Perm{"a": PermReadWrite, "b": PermRead}})
 	s.Put("K3", &Key{Owner: "bob", Label: "three", Created: time.Unix(3, 0), Buckets: map[string]Perm{}})
+	s.PutBucketMeta("a", &BucketMeta{Groups: map[string]Perm{"photos": PermRead}})
+	s.PutPerson("alice", &Person{UID: 1, GID: 1, Groups: []string{"photos"}, Source: "ldap"})
 
 	reopened, err := OpenStore(path)
 	if err != nil {
@@ -134,8 +259,20 @@ func TestStore(t *testing.T) {
 	if got := reopened.KeysFor("alice"); len(got) != 2 || got[0].Access != "K1" {
 		t.Fatalf("KeysFor: %+v", got)
 	}
-	if g := reopened.Grants("a"); len(g) != 2 || g["K2"] != PermReadWrite {
+	if g := reopened.Grants("a"); len(g) != 2 || g["K2"] != (KeyGrant{"alice", PermReadWrite}) {
 		t.Fatalf("Grants: %v", g)
+	}
+	if m := reopened.BucketMeta("a"); m.Groups["photos"] != PermRead {
+		t.Fatalf("BucketMeta: %+v", m)
+	}
+	// Returned values are copies.
+	k, _ := reopened.Get("K1")
+	k.Buckets["z"] = PermRead
+	if k2, _ := reopened.Get("K1"); len(k2.Buckets) != 1 {
+		t.Fatal("changing a returned key changed the store")
+	}
+	if g := reopened.KnownGroups(); strings.Join(g, ",") != "photos" {
+		t.Fatalf("KnownGroups: %v", g)
 	}
 	reopened.Delete("K1")
 	again, _ := OpenStore(path)
@@ -145,9 +282,9 @@ func TestStore(t *testing.T) {
 }
 
 func TestCSRFAndAuthRequired(t *testing.T) {
-	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
-	srv := NewServer(nil, stubAuth{}, nil, sessions, "t", "https://s3", "us-east-1")
-	h := srv.Handler()
+	store := testStore(t)
+	sessions := testSessions(t, store, "alice")
+	h := NewServer(NewPortal(nil, store), stubAuth{}, nil, sessions, "t", "https://s3", "us-east-1").Handler()
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/keys/delete", nil))
@@ -155,11 +292,9 @@ func TestCSRFAndAuthRequired(t *testing.T) {
 		t.Fatalf("unauthenticated POST: want redirect, got %d", rec.Code)
 	}
 
-	login := httptest.NewRecorder()
-	sessions.Start(login, User{Name: "alice", UID: 1001, GID: 1001})
 	req := httptest.NewRequest("POST", "/keys/delete", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(login.Result().Cookies()[0])
+	req.AddCookie(loginCookie(t, sessions, "alice"))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -170,39 +305,53 @@ func TestCSRFAndAuthRequired(t *testing.T) {
 	}
 }
 
-func TestAdminAndUploadGuards(t *testing.T) {
-	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
-	h := NewServer(nil, stubAuth{}, nil, sessions, "t", "https://s3", "us-east-1").Handler()
-	login := httptest.NewRecorder()
-	sessions.Start(login, User{Name: "alice", UID: 1001, GID: 1001})
-	cookie := login.Result().Cookies()[0]
+func TestAdminUploadAndAPIGuards(t *testing.T) {
+	store := testStore(t)
+	sessions := testSessions(t, store, "alice")
+	srv := NewServer(NewPortal(nil, store), stubAuth{}, nil, sessions, "t", "https://s3", "us-east-1")
+	srv.APIToken = "0123456789abcdef0123456789abcdef-token"
+	h := srv.Handler()
+	cookie := loginCookie(t, sessions, "alice")
 
-	req := httptest.NewRequest("GET", "/admin", nil)
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-admin GET /admin: want 403, got %d", rec.Code)
+	do := func(method, path string, body string, hdr map[string]string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		if hdr["Authorization"] == "" {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
 	}
-
-	req = httptest.NewRequest("PUT", "/upload?bucket=b&key=k", strings.NewReader("x"))
-	req.AddCookie(cookie)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("upload without CSRF header: want 403, got %d", rec.Code)
+	if c := do("GET", "/admin", "", nil); c != http.StatusForbidden {
+		t.Fatalf("non-admin GET /admin: want 403, got %d", c)
 	}
-}
-
-func TestAdminGroup(t *testing.T) {
-	entry := ldap.NewEntry("cn=will,ou=users,dc=example,dc=com", map[string][]string{
-		"memberOf": {"ou=s3-users,ou=groups,dc=example,dc=com", "OU=S3-Admin,ou=groups,dc=example,dc=com"},
-	})
-	if !hasGroup(entry, "ou=s3-admin,ou=groups,dc=example,dc=com") {
-		t.Error("admin group not found")
+	if c := do("PUT", "/upload?bucket=b&key=k", "x", nil); c != http.StatusForbidden {
+		t.Fatalf("upload without CSRF header: want 403, got %d", c)
 	}
-	if hasGroup(entry, "ou=other,ou=groups,dc=example,dc=com") {
-		t.Error("found a group the entry isn't in")
+	if c := do("GET", "/api/users/alice", "", nil); c != http.StatusUnauthorized {
+		t.Fatalf("API from a non-admin session: want 401, got %d", c)
+	}
+	if c := do("GET", "/api/users/alice", "", map[string]string{"Authorization": "Bearer wrong"}); c != http.StatusUnauthorized {
+		t.Fatalf("API with a wrong token: want 401, got %d", c)
+	}
+	if c := do("GET", "/api/users/alice", "", map[string]string{"Authorization": "Bearer " + srv.APIToken}); c != http.StatusOK {
+		t.Fatalf("API with the token: want 200, got %d", c)
+	}
+	// Without a directory, checks are a clear error rather than a crash.
+	if c := do("POST", "/api/users/alice/check", "", map[string]string{"Authorization": "Bearer " + srv.APIToken}); c != http.StatusBadRequest {
+		t.Fatalf("check without a directory: want 400, got %d", c)
+	}
+	// Admin sessions need the CSRF header for API writes.
+	store.PutPerson("alice", &Person{UID: 1001, GID: 1001, Source: "ldap", Admin: true})
+	if c := do("POST", "/api/directory/sync", "", nil); c != http.StatusUnauthorized {
+		t.Fatalf("admin API write without CSRF: want 401, got %d", c)
+	}
+	srv.APIToken = ""
+	if c := do("GET", "/api/users/alice", "", map[string]string{"Authorization": "Bearer "}); c != http.StatusUnauthorized {
+		t.Fatalf("empty token when none is set: want 401, got %d", c)
 	}
 }
 

@@ -75,8 +75,9 @@ func run() error {
 	)
 	// LDAP password login and OIDC are each optional, but one is needed.
 	var auth Authenticator
+	var ldapAuth *LDAPAuth
 	if os.Getenv("LDAP_URL") != "" {
-		auth = &LDAPAuth{
+		ldapAuth = &LDAPAuth{
 			URL:          need("LDAP_URL"),
 			ServerName:   os.Getenv("LDAP_SERVER_NAME"),
 			CAFile:       os.Getenv("LDAP_CA_FILE"),
@@ -85,7 +86,17 @@ func run() error {
 			BindPassword: secret("LDAP_BIND_PASSWORD"),
 			AllowedGroup: os.Getenv("ALLOWED_GROUP_DN"),
 			AdminGroup:   os.Getenv("ADMIN_GROUP_DN"),
+			GroupFilter:  os.Getenv("LDAP_GROUP_FILTER"),
 		}
+		auth = ldapAuth
+	}
+	pollInterval, err := time.ParseDuration(env("DIRECTORY_POLL_INTERVAL", "5m"))
+	if err != nil || pollInterval < 10*time.Second {
+		missing = append(missing, errors.New("DIRECTORY_POLL_INTERVAL must be a duration of at least 10s, e.g. 5m"))
+	}
+	var apiToken string
+	if os.Getenv("API_TOKEN") != "" || os.Getenv("API_TOKEN_FILE") != "" {
+		apiToken = secret("API_TOKEN")
 	}
 	var oidcConfig *OIDCConfig
 	if os.Getenv("OIDC_ISSUER") != "" {
@@ -137,6 +148,9 @@ func run() error {
 		return err
 	}
 	portal := NewPortal(vgw, store)
+	if ldapAuth != nil {
+		portal.dir = ldapAuth
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -157,8 +171,23 @@ func run() error {
 		}
 	}
 
-	sessions := &Sessions{Key: []byte(sessionKey), TTL: 12 * time.Hour, Secure: env("INSECURE_COOKIES", "") == ""}
+	if apiToken != "" && len(apiToken) < 32 {
+		return errors.New("API_TOKEN must be at least 32 characters")
+	}
+	if portal.dir != nil {
+		// Catch up on anything that changed while the portal was down, then
+		// keep checking.
+		if report, err := portal.SyncDirectory(ctx); err != nil {
+			slog.Error("directory sync at startup", "err", err)
+		} else {
+			slog.Info("directory sync at startup", "checked", report.Checked, "changed", len(report.Changed), "disabled", report.Disabled)
+		}
+		go portal.PollDirectory(ctx, pollInterval)
+	}
+
+	sessions := &Sessions{Key: []byte(sessionKey), TTL: 12 * time.Hour, Secure: env("INSECURE_COOKIES", "") == "", Store: store}
 	server := NewServer(portal, auth, oidcAuth, sessions, env("TITLE", "S3 access keys"), publicURL, vgw.Region)
+	server.APIToken = apiToken
 	httpServer := &http.Server{
 		Addr:              env("LISTEN", ":8080"),
 		Handler:           server.Handler(),

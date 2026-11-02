@@ -61,6 +61,14 @@ func ok(t *testing.T, what string, err error) {
 	}
 }
 
+// enroll records u as having logged in with LDAP, in groups.
+func enroll(t *testing.T, p *Portal, u User, groups ...string) {
+	t.Helper()
+	if _, err := p.Login(context.Background(), Identity{User: u, Groups: groups}, "ldap"); err != nil {
+		t.Fatalf("enroll %s: %v", u.Name, err)
+	}
+}
+
 func userError(t *testing.T, what string, err error) {
 	t.Helper()
 	if _, isUser := err.(*UserError); !isUser {
@@ -80,6 +88,8 @@ func TestPortalAgainstGateway(t *testing.T) {
 	photos, docs, bobs := "photos-"+suffix, "docs-"+suffix, "bobs-"+suffix
 	alice := User{Name: "alice" + suffix, UID: 1001, GID: 1001}
 	bob := User{Name: "bob" + suffix, UID: 1002, GID: 1002}
+	enroll(t, p, alice)
+	enroll(t, p, bob)
 
 	ok(t, "create photos", p.CreateBucket(ctx, alice, photos))
 	ok(t, "create docs", p.CreateBucket(ctx, alice, docs))

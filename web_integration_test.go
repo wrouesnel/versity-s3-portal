@@ -13,13 +13,16 @@ import (
 	"testing"
 )
 
-type stubAuth struct{ user User }
+type stubAuth struct {
+	user   User
+	groups []string
+}
 
-func (a stubAuth) Authenticate(username, password string) (User, error) {
+func (a stubAuth) Authenticate(username, password string) (Identity, error) {
 	if username != a.user.Name || password != "pw" {
-		return User{}, ErrBadCredentials
+		return Identity{}, ErrBadCredentials
 	}
-	return a.user, nil
+	return Identity{User: a.user, Groups: a.groups}, nil
 }
 
 // Drives the web UI over HTTP against the scratch gateway: log in, upload,
@@ -33,10 +36,11 @@ func TestWebAgainstGateway(t *testing.T) {
 	suffix := strings.ToLower(newAccessKey()[3:9])
 	bucket := "web-" + suffix
 	user := User{Name: "carol" + suffix, UID: 1004, GID: 1004, Admin: true}
+	enroll(t, p, user)
 	ok(t, "create bucket", p.CreateBucket(ctx, user, bucket))
 
-	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: 3600e9}
-	srv := httptest.NewServer(NewServer(p, stubAuth{user}, nil, sessions, "t", "https://s3", "us-east-1").Handler())
+	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: 3600e9, Store: store}
+	srv := httptest.NewServer(NewServer(p, stubAuth{user: user}, nil, sessions, "t", "https://s3", "us-east-1").Handler())
 	defer srv.Close()
 	jar, _ := cookiejar.New(nil)
 	c := &http.Client{Jar: jar}
@@ -46,7 +50,7 @@ func TestWebAgainstGateway(t *testing.T) {
 	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindSubmatch(page)
-	if m == nil || !strings.Contains(string(page), "/browse?bucket="+bucket) {
+	if m == nil || !strings.Contains(string(page), "/files?bucket="+bucket) {
 		t.Fatalf("dashboard after login lacks the CSRF token or bucket link:\n%s", page)
 	}
 	csrf := string(m[1])

@@ -7,7 +7,7 @@
     <dt>Secret access key</dt><dd><code class="copy">{{.KeySecret}}</code></dd>
     <dt>Endpoint</dt><dd><code class="copy">{{.S3URL}}</code></dd>
     <dt>Region</dt><dd><code>{{.Region}}</code></dd>
-    <dt>Buckets</dt><dd>{{$g := .Grants}}{{if .Buckets}}<ul class="perms">{{range .Buckets}}<li><code>{{.}}</code> <span class="pill {{index $g .}}">{{permLabel (index $g .)}}</span></li>{{end}}</ul>{{else}}<span class="muted">none yet</span>{{end}}</dd>
+    <dt>Buckets</dt><dd>{{if .Grants}}{{template "perms" .Grants}}{{else}}<span class="muted">none yet</span>{{end}}</dd>
   </dl>
   <h2>rclone</h2>
   <pre class="copy">[s3]
@@ -20,9 +20,10 @@ region = {{.Region}}
 force_path_style = true
 no_check_bucket = true</pre>
   <p class="muted">Keys can't create buckets, so tools that try to need telling not to. rclone tries by default, which is what the <code>no_check_bucket</code> line is for.</p>
+  {{range $b, $p := .Grants}}{{if eq $p "createonly"}}<p class="flash warning">This key can only <strong>add</strong> files to {{$b}}: every upload must send <code>If-None-Match: *</code> and be a single PUT (no multipart). With the AWS CLI that's <code>aws s3api put-object --if-none-match '*'</code>.</p>{{end}}{{end}}
   <h2>AWS CLI</h2>
   <pre class="copy">AWS_ACCESS_KEY_ID={{.KeyAccess}} AWS_SECRET_ACCESS_KEY={{.KeySecret}} \
   aws --endpoint-url {{.S3URL}} --region {{.Region}} s3 ls s3://BUCKET/</pre>
-  <p><a class="button" href="/">Done</a></p>
+  <p><a class="button" href="/keys">Done</a></p>
 </section>
 {{template "footer" .}}

@@ -1,6 +1,6 @@
 {{template "header" .}}
 <section class="card">
-  <nav class="crumbs" aria-label="Back"><a href="/">Buckets &amp; keys</a></nav>
+  <nav class="crumbs" aria-label="Back"><a href="/keys">Access keys</a></nav>
   <h1>Edit access key</h1>
   <p class="muted">Access key ID <code>{{.KeyAccess}}</code></p>
   <form method="post" action="/keys/edit">
@@ -9,7 +9,7 @@
     <label>Name <input name="label" value="{{.KeyLabel}}" maxlength="64" required></label>
     <h2>Buckets</h2>
     {{template "grants" .}}
-    <p class="row"><button>Save</button> <a class="button ghost" href="/">Cancel</a></p>
+    <p class="row"><button>Save</button> <a class="button ghost" href="/keys">Cancel</a></p>
   </form>
 </section>
 {{template "footer" .}}

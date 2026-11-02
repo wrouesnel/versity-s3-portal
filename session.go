@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -14,17 +13,24 @@ import (
 
 const sessionCookie = "s3portal_session"
 
-// Session is the signed contents of the session cookie.
+// Session is a logged-in request's session: who, and their CSRF token.
+// User is filled in from the portal's current record of the person, not
+// from the time they logged in, so admin rights and groups follow the
+// directory.
 type Session struct {
-	User    User      `json:"user"`
-	CSRF    string    `json:"csrf"`
-	Expires time.Time `json:"exp"`
+	ID   string
+	User User
+	CSRF string
 }
 
+// Sessions keeps sessions server-side, in the store, so logging out and
+// disabling someone end them at once. The cookie holds only the session's
+// ID, signed.
 type Sessions struct {
 	Key    []byte
 	TTL    time.Duration
 	Secure bool
+	Store  *Store
 }
 
 func (s *Sessions) sign(payload string) string {
@@ -33,18 +39,17 @@ func (s *Sessions) sign(payload string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Sessions) Start(w http.ResponseWriter, user User) error {
-	sess := Session{User: user, CSRF: randomToken(24), Expires: time.Now().Add(s.TTL)}
-	data, err := json.Marshal(sess)
-	if err != nil {
+func (s *Sessions) Start(w http.ResponseWriter, user string) error {
+	id := randomToken(24)
+	rec := &SessionRecord{User: user, CSRF: randomToken(24), Expires: time.Now().Add(s.TTL)}
+	if err := s.Store.PutSession(id, rec); err != nil {
 		return err
 	}
-	payload := base64.RawURLEncoding.EncodeToString(data)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    payload + "." + s.sign(payload),
+		Value:    id + "." + s.sign("session:"+id),
 		Path:     "/",
-		Expires:  sess.Expires,
+		Expires:  rec.Expires,
 		HttpOnly: true,
 		Secure:   s.Secure,
 		SameSite: http.SameSiteStrictMode,
@@ -52,7 +57,11 @@ func (s *Sessions) Start(w http.ResponseWriter, user User) error {
 	return nil
 }
 
-func (s *Sessions) End(w http.ResponseWriter) {
+// End ends the request's session, if it has one, and clears the cookie.
+func (s *Sessions) End(w http.ResponseWriter, r *http.Request) {
+	if id, ok := s.id(r); ok {
+		s.Store.DeleteSession(id)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: s.Secure, SameSite: http.SameSiteStrictMode,
@@ -61,24 +70,34 @@ func (s *Sessions) End(w http.ResponseWriter) {
 
 var errNoSession = errors.New("no session")
 
-func (s *Sessions) Get(r *http.Request) (*Session, error) {
+func (s *Sessions) id(r *http.Request) (string, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
+		return "", false
+	}
+	id, sig, ok := strings.Cut(c.Value, ".")
+	if !ok || !hmac.Equal([]byte(sig), []byte(s.sign("session:"+id))) {
+		return "", false
+	}
+	return id, true
+}
+
+// Get returns the request's session, with User filled in from the store's
+// record of the person. A disabled or unknown person has no session.
+func (s *Sessions) Get(r *http.Request) (*Session, error) {
+	id, ok := s.id(r)
+	if !ok {
 		return nil, errNoSession
 	}
-	payload, sig, ok := strings.Cut(c.Value, ".")
-	if !ok || !hmac.Equal([]byte(sig), []byte(s.sign(payload))) {
+	rec, ok := s.Store.Session(id)
+	if !ok || time.Now().After(rec.Expires) {
 		return nil, errNoSession
 	}
-	data, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil {
+	person, ok := s.Store.Person(rec.User)
+	if !ok || person.Disabled {
 		return nil, errNoSession
 	}
-	var sess Session
-	if err := json.Unmarshal(data, &sess); err != nil || time.Now().After(sess.Expires) {
-		return nil, errNoSession
-	}
-	return &sess, nil
+	return &Session{ID: id, User: person.User(rec.User), CSRF: rec.CSRF}, nil
 }
 
 func randomToken(n int) string {

@@ -151,52 +151,52 @@ func (o *OIDCAuth) takeFlow(w http.ResponseWriter, r *http.Request, s *Sessions)
 
 // Callback finishes a login and returns the user and their subject
 // (issuer and sub), which stays the same if their username changes.
-func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request, s *Sessions) (User, string, error) {
+func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request, s *Sessions) (Identity, string, error) {
 	flow, err := o.takeFlow(w, r, s)
 	if err != nil {
-		return User{}, "", err
+		return Identity{}, "", err
 	}
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
-		return User{}, "", &errOIDCDenied{"The sign-in provider said: " + e}
+		return Identity{}, "", &errOIDCDenied{"The sign-in provider said: " + e}
 	}
 	if !hmac.Equal([]byte(q.Get("state")), []byte(flow.State)) {
-		return User{}, "", errors.New("state mismatch")
+		return Identity{}, "", errors.New("state mismatch")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	token, err := o.oauth.Exchange(ctx, q.Get("code"), oauth2.VerifierOption(flow.Verifier))
 	if err != nil {
-		return User{}, "", fmt.Errorf("exchange code: %w", err)
+		return Identity{}, "", fmt.Errorf("exchange code: %w", err)
 	}
 	raw, ok := token.Extra("id_token").(string)
 	if !ok {
-		return User{}, "", errors.New("no id_token in token response")
+		return Identity{}, "", errors.New("no id_token in token response")
 	}
 	idToken, err := o.verifier.Verify(ctx, raw)
 	if err != nil {
-		return User{}, "", fmt.Errorf("verify id_token: %w", err)
+		return Identity{}, "", fmt.Errorf("verify id_token: %w", err)
 	}
 	if !hmac.Equal([]byte(idToken.Nonce), []byte(flow.Nonce)) {
-		return User{}, "", errors.New("nonce mismatch")
+		return Identity{}, "", errors.New("nonce mismatch")
 	}
 	claims := map[string]any{}
 	if err := idToken.Claims(&claims); err != nil {
-		return User{}, "", err
+		return Identity{}, "", err
 	}
 	// Providers often leave groups and custom claims out of the ID token;
 	// the userinfo endpoint has them.
 	if o.needsUserinfo(claims) {
 		info, err := o.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
 		if err != nil {
-			return User{}, "", fmt.Errorf("userinfo: %w", err)
+			return Identity{}, "", fmt.Errorf("userinfo: %w", err)
 		}
 		if info.Subject != idToken.Subject {
-			return User{}, "", errors.New("userinfo subject doesn't match the id_token")
+			return Identity{}, "", errors.New("userinfo subject doesn't match the id_token")
 		}
 		extra := map[string]any{}
 		if err := info.Claims(&extra); err != nil {
-			return User{}, "", err
+			return Identity{}, "", err
 		}
 		for k, v := range extra {
 			if _, ok := claims[k]; !ok {
@@ -206,7 +206,7 @@ func (o *OIDCAuth) Callback(w http.ResponseWriter, r *http.Request, s *Sessions)
 	}
 	user, err := o.userFromClaims(claims)
 	if err != nil {
-		return User{}, "", err
+		return Identity{}, "", err
 	}
 	return user, o.issuer + " " + idToken.Subject, nil
 }
@@ -230,30 +230,30 @@ func usernameFromClaim(v string) string {
 	return v
 }
 
-func (o *OIDCAuth) userFromClaims(claims map[string]any) (User, error) {
+func (o *OIDCAuth) userFromClaims(claims map[string]any) (Identity, error) {
 	rawName, _ := claims[o.UsernameClaim].(string)
 	name := usernameFromClaim(rawName)
 	if !usernameRe.MatchString(name) {
-		return User{}, &errOIDCDenied{fmt.Sprintf("Your account's %s (%q) can't be used as a username here.", o.UsernameClaim, rawName)}
+		return Identity{}, &errOIDCDenied{fmt.Sprintf("Your account's %s (%q) can't be used as a username here.", o.UsernameClaim, rawName)}
 	}
 	groups := claimStrings(claims[o.GroupsClaim])
 	if o.AllowedGroup != "" && !containsFold(groups, o.AllowedGroup) {
-		return User{}, &errOIDCDenied{"Your account isn't allowed to use this service."}
+		return Identity{}, &errOIDCDenied{"Your account isn't allowed to use this service."}
 	}
 	user := User{Name: name, UID: o.DefaultUID, GID: o.DefaultGID}
 	if o.UIDClaim != "" {
 		uid, err1 := claimInt(claims[o.UIDClaim])
 		gid, err2 := claimInt(claims[o.GIDClaim])
 		if err1 != nil || err2 != nil {
-			return User{}, &errOIDCDenied{"Your account has no usable uid and gid."}
+			return Identity{}, &errOIDCDenied{"Your account has no usable uid and gid."}
 		}
 		user.UID, user.GID = uid, gid
 	}
 	if user.UID <= 0 || user.GID <= 0 {
-		return User{}, &errOIDCDenied{"Your account has no usable uid and gid."}
+		return Identity{}, &errOIDCDenied{"Your account has no usable uid and gid."}
 	}
 	user.Admin = o.AdminGroup != "" && containsFold(groups, o.AdminGroup)
-	return user, nil
+	return Identity{User: user, Groups: groups}, nil
 }
 
 func claimStrings(v any) []string {
@@ -306,9 +306,9 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 
 // oidcCallback finishes a login with the provider.
 func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
-	user, subject, err := s.OIDC.Callback(w, r, s.Sessions)
+	id, subject, err := s.OIDC.Callback(w, r, s.Sessions)
 	if err == nil {
-		err = s.Portal.BindSubject(user.Name, subject)
+		err = s.Portal.BindSubject(id.Name, subject)
 	}
 	if err != nil {
 		msg := "Signing in didn't work. Try again."
@@ -318,21 +318,19 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.As(err, &denied):
 			msg = denied.reason
-			slog.Info("oidc login refused", "user", user.Name, "reason", denied.reason, "remote", r.RemoteAddr)
+			slog.Info("oidc login refused", "user", id.Name, "reason", denied.reason, "remote", r.RemoteAddr)
 		case errors.As(err, &ue):
 			msg = ue.Msg
-			slog.Warn("oidc login refused", "user", user.Name, "reason", ue.Msg, "remote", r.RemoteAddr)
+			slog.Warn("oidc login refused", "user", id.Name, "reason", ue.Msg, "remote", r.RemoteAddr)
 		default:
 			slog.Error("oidc login", "err", err, "remote", r.RemoteAddr)
 		}
 		s.render(w, status, "login.html", page{Error: msg})
 		return
 	}
-	if err := s.Sessions.Start(w, user); err != nil {
-		http.Error(w, "session error", http.StatusInternalServerError)
+	if !s.startSession(w, r, id, "oidc") {
 		return
 	}
-	slog.Info("login", "user", user.Name, "via", "oidc", "remote", r.RemoteAddr)
 	// The session cookie is SameSite=Strict, and browsers don't send it on a
 	// redirect that started on the provider's site, so step through a page
 	// of our own first.

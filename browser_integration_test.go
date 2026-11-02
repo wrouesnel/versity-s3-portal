@@ -26,6 +26,9 @@ func TestBrowserAndAdminAgainstGateway(t *testing.T) {
 	alice := User{Name: "alice" + suffix, UID: 1001, GID: 1001}
 	bob := User{Name: "bob" + suffix, UID: 1002, GID: 1002}
 	admin := User{Name: "admin" + suffix, UID: 1003, GID: 1003, Admin: true}
+	enroll(t, p, alice)
+	enroll(t, p, bob)
+	enroll(t, p, admin)
 	ok(t, "create files", p.CreateBucket(ctx, alice, files))
 	ok(t, "create bobs", p.CreateBucket(ctx, bob, bobs))
 

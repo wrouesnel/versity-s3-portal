@@ -1,13 +1,13 @@
 {{template "header" .}}
 <section class="card">
-  <nav class="crumbs" aria-label="Back"><a href="/">Buckets &amp; keys</a></nav>
+  <nav class="crumbs" aria-label="Back"><a href="/keys">Access keys</a></nav>
   <h1>New access key</h1>
   <form method="post" action="/keys">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label>Name <input name="label" value="{{.KeyLabel}}" maxlength="64" placeholder="e.g. laptop backups" required autofocus></label>
     <h2>Buckets</h2>
     {{template "grants" .}}
-    <p class="row"><button>Create key</button> <a class="button ghost" href="/">Cancel</a></p>
+    <p class="row"><button>Create key</button> <a class="button ghost" href="/keys">Cancel</a></p>
   </form>
 </section>
 {{template "footer" .}}
