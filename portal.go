@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -262,6 +263,50 @@ func (p *Portal) CheckPerson(ctx context.Context, name string) (PersonStatus, er
 	st := statusOf(name, person, len(p.store.KeysFor(name)))
 	st.Changed, st.EndedSessions = changed, ended
 	return st, nil
+}
+
+// LearnPeople records, from the directory, everyone who has keys or a web
+// account but no record yet: people from before the portal kept records,
+// whose keys would otherwise reach nothing until they logged in again. It
+// only touches the store, so it can run before the gateway is reachable.
+func (p *Portal) LearnPeople() error {
+	if p.dir == nil {
+		return nil
+	}
+	known := p.store.People()
+	var unknown []string
+	for _, e := range p.store.Entries() {
+		if _, ok := known[e.Owner]; !ok && !slices.Contains(unknown, e.Owner) {
+			unknown = append(unknown, e.Owner)
+		}
+	}
+	for _, name := range p.store.WebUsers() {
+		if _, ok := known[name]; !ok && !slices.Contains(unknown, name) {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	all, err := p.dir.CheckAll()
+	if err != nil {
+		return err
+	}
+	for _, name := range unknown {
+		d, found := all[name]
+		if !found {
+			d = DirEntry{Disabled: true, Reason: "not in the directory"}
+		}
+		person := &Person{
+			UID: d.UID, GID: d.GID, Groups: d.Groups, Admin: d.Admin, Source: "ldap",
+			Disabled: d.Disabled, DisabledReason: d.Reason, Checked: time.Now().UTC(),
+		}
+		if err := p.store.PutPerson(name, person); err != nil {
+			return err
+		}
+		slog.Info("learned person from the directory", "user", name, "disabled", d.Disabled, "reason", d.Reason)
+	}
+	return nil
 }
 
 // SyncReport is what a whole-directory sync did.

@@ -380,3 +380,33 @@ func TestPaths(t *testing.T) {
 		t.Error("checkPrefix accepted a prefix without a trailing slash")
 	}
 }
+
+// People with keys from before the portal kept records are learned from the
+// directory, so their keys keep working after an upgrade.
+func TestLearnPeople(t *testing.T) {
+	store := testStore(t)
+	store.Put("K1", &Key{Owner: "alice", Label: "old", Buckets: map[string]Perm{"a": PermRead}})
+	store.Put("K2", &Key{Owner: "gone", Label: "old", Buckets: map[string]Perm{}})
+	store.PutWeb("bob", &WebAccount{Access: "web.bob", Secret: "s"})
+	store.PutPerson("carol", &Person{UID: 9, GID: 9, Source: "oidc"})
+	p := NewPortal(nil, store)
+	p.dir = &fakeDir{entries: map[string]DirEntry{
+		"alice": {UID: 1001, GID: 1001, Groups: []string{"photos"}},
+		"bob":   {UID: 1002, GID: 1002, Disabled: true, Reason: "account inactive"},
+	}}
+	if err := p.LearnPeople(); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"alice": false, "bob": true, "gone": true} {
+		person, ok := store.Person(name)
+		if !ok || person.Source != "ldap" || person.Disabled != want {
+			t.Errorf("%s: %+v", name, person)
+		}
+	}
+	if a, _ := store.Person("alice"); a.UID != 1001 || !a.InGroup("photos") {
+		t.Errorf("alice: %+v", a)
+	}
+	if c, _ := store.Person("carol"); c.Source != "oidc" {
+		t.Error("an existing record was replaced")
+	}
+}

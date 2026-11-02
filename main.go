@@ -166,6 +166,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Before any policy is written, so people from before the portal kept
+	// records keep their access.
+	if err := portal.LearnPeople(); err != nil {
+		slog.Error("learn people from the directory", "err", err)
+	}
+
 	// The gateway may still be starting.
 	for attempt := 1; ; attempt++ {
 		err := portal.Reconcile(ctx)
