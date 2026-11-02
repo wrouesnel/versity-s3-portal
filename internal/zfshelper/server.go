@@ -39,6 +39,11 @@ type Config struct {
 	// Root is where Parent is mounted, and so where the gateway keeps
 	// buckets, e.g. /storage/s3/buckets.
 	Root string
+	// Trash is the dataset deleted buckets are moved under, unmounted,
+	// e.g. storage/s3/trash. It must be in Parent's pool and not inside
+	// Parent, and should have canmount=off and mountpoint=none. Default:
+	// "trash" beside Parent.
+	Trash string
 	// Staging is a root-only (0700) directory on the same host, outside
 	// Root, where new datasets are first mounted and set up before they
 	// take a bucket's place. Default: .s3-zfs-staging beside Root.
@@ -81,6 +86,9 @@ func New(c Config) *Server {
 	}
 	if c.StateDir == "" {
 		c.StateDir = "/var/lib/s3-zfs-helper"
+	}
+	if c.Trash == "" {
+		c.Trash = path.Join(path.Dir(c.Parent), "trash")
 	}
 	if c.MaxReads <= 0 {
 		c.MaxReads = 8
@@ -147,6 +155,9 @@ func (s *Server) Check(ctx context.Context) error {
 	}
 	if strings.HasPrefix(s.Staging+"/", s.Root+"/") {
 		return fmt.Errorf("the staging directory %s must be outside %s", s.Staging, s.Root)
+	}
+	if err := s.checkTrash(ctx); err != nil {
+		return err
 	}
 	for _, dir := range []string{s.Staging, s.StateDir} {
 		if err := rootOnlyDir(dir); err != nil {
@@ -233,6 +244,9 @@ func (s *Server) Handler() http.Handler {
 	h("GET /buckets/{b}/snapshots/{s}/list", true, s.listSnapshotObjects)
 	h("GET /buckets/{b}/snapshots/{s}/object", true, s.getSnapshotObject)
 	h("POST /buckets/{b}/snapshots/{s}/restore", false, s.restoreHandler)
+	h("GET /trash", true, s.listTrash)
+	h("DELETE /trash/{e}", false, s.purgeTrash)
+	h("POST /trash/{e}/restore", false, s.restoreTrash)
 	return mux
 }
 
@@ -415,74 +429,6 @@ func isEmpty(fd int) (bool, error) {
 		}
 	}
 	return true, nil
-}
-
-// destroy destroys an empty bucket's dataset with its portal snapshots.
-// It refuses while the dataset has any other snapshot (the host's weekly
-// ones), since destroying it would destroy those too. The dataset is made
-// read-only before the final emptiness check, so nothing can be written
-// between the check and the destroy.
-func (s *Server) destroy(w http.ResponseWriter, r *http.Request) error {
-	name, _, _, err := s.bucketName(r)
-	if err != nil {
-		return err
-	}
-	defer s.lock(name)()
-	ctx := r.Context()
-	b, err := s.dataset(r)
-	if err != nil {
-		return err
-	}
-	defer b.close()
-	snaps, err := s.allSnapshots(ctx, b.ds)
-	if err != nil {
-		return err
-	}
-	var host []string
-	for _, sn := range snaps {
-		if !zfsapi.SnapshotName.MatchString(sn.Name) {
-			host = append(host, sn.Name)
-		}
-	}
-	if len(host) > 0 {
-		return &apiError{http.StatusConflict, zfsapi.CodeHasHostSnapshots,
-			fmt.Sprintf("bucket %s has %d snapshots that aren't the portal's (e.g. %s); they must be removed on the host first", name, len(host), host[0])}
-	}
-	notEmpty := &apiError{http.StatusConflict, zfsapi.CodeNotEmpty, fmt.Sprintf("bucket %s isn't empty", name)}
-	if empty, err := isEmpty(b.fd); err != nil || !empty {
-		if err != nil {
-			return err
-		}
-		return notEmpty
-	}
-	if err := s.setReadonly(ctx, b.ds, true); err != nil {
-		return err
-	}
-	writable := func() {
-		if err := s.setReadonly(context.WithoutCancel(ctx), b.ds, false); err != nil {
-			s.Log.Error("couldn't make the bucket writable again", "bucket", name, "err", err)
-		}
-	}
-	empty, err := isEmpty(b.fd)
-	if err != nil || !empty {
-		writable()
-		if err != nil {
-			return err
-		}
-		return notEmpty
-	}
-	if _, err := s.run(ctx, "destroy", "-r", b.ds); err != nil {
-		writable()
-		return err
-	}
-	// zfs normally removes the mountpoint; if it's left, remove it so the
-	// gateway no longer sees a bucket there.
-	if err := syscall.Rmdir(b.dir); err != nil && !errors.Is(err, syscall.ENOENT) {
-		s.Log.Warn("couldn't remove the old mountpoint", "dir", b.dir, "err", err)
-	}
-	s.Log.Info("destroyed bucket dataset", "bucket", name, "dataset", b.ds)
-	w.WriteHeader(http.StatusNoContent)
-	return nil
 }
 
 func (s *Server) putQuota(w http.ResponseWriter, r *http.Request) error {

@@ -34,17 +34,34 @@ host's own `zfs` command.
   back. Adopting a bucket that's already a mounted dataset does nothing, so
   it's safe to repeat. A dataset that exists but isn't mounted at its
   bucket is reported as a conflict, not treated as adopted.
-- **Destroy.** Only an empty bucket is destroyed: empty as the gateway
-  means it, so nothing at the dataset's root but `.sgwtmp` (any uploads in
-  progress there are abandoned with the bucket) and `.zfs`. An empty folder
-  is a folder object and counts as content. The helper refuses
-  (`HasHostSnapshots`) while the dataset has any snapshot that isn't the
-  portal's, because `zfs destroy -r` would destroy the host's snapshots
-  too. Those have to be removed on the host first. Before the final
-  emptiness check, the dataset is set `readonly=on`, so nothing can be
-  written between the check and the destroy. If the check fails, readonly
-  is inherited again. Any mountpoint directory zfs leaves behind is
-  removed, so the gateway no longer sees the bucket.
+- **Delete, to the trash.** Deleting a bucket doesn't destroy its dataset.
+  Every dataset collects the host's weekly snapshots, and a destroy would
+  take those with it. Only an empty bucket can be deleted: empty as the
+  gateway means it, so nothing at the dataset's root but `.sgwtmp` (any
+  uploads in progress there are abandoned with the bucket) and `.zfs`. An
+  empty folder is a folder object and counts as content. The steps:
+  1. set `readonly=on`, then check it's empty a final time, so nothing can
+     be written in between (if it isn't empty, readonly is inherited again);
+  2. `zfs unmount`, then `zfs set canmount=off`;
+  3. `zfs rename <parent>/<b> <trash>/<b>-<UTC yyyymmddThhmmssZ>`, then
+     `zfs inherit mountpoint` (the trash has `mountpoint=none`);
+  4. remove the bucket's now-empty directory and check the entry is
+     unmounted, so the gateway no longer sees the bucket.
+
+  If a step fails, the earlier ones are undone. The trashed dataset keeps
+  all its snapshots, the host's included, and stays read-only and
+  unmounted.
+- **The trash.** Admins, through the portal, can list it, restore an
+  entry, or purge one for good. A purge is `zfs destroy -r`, the host's
+  snapshots included, by the admin's explicit choice. A restore is refused
+  (`Exists`) while a bucket of that name exists, as a dataset or as a
+  directory. Otherwise it renames the dataset back to `<parent>/<b>`, sets
+  its mountpoint to the bucket's directory, inherits `canmount` and
+  `readonly`, mounts it and checks it's mounted there. If that fails it
+  goes back to the trash as it was. The dataset's root still carries the
+  gateway's xattrs (the bucket's owner, ACL and policy), so the gateway
+  sees the bucket again as it was. Anything the portal keeps about the
+  bucket elsewhere is the portal's to restore.
 - **Quota.** The `refquota` property, so snapshots don't count against
   it. 0 removes it.
 - **Backup flag.** `backupctl:include=on` when on. When off, the property
@@ -104,9 +121,14 @@ host's own `zfs` command.
 - Set `setuid=off`, `devices=off` and `exec=off` on the parent dataset, so
   every bucket inherits them: nothing anyone uploads can run, or act as a
   device, on the host.
+- Create the trash dataset (`-trash`, default `storage/s3/trash`) in the
+  same pool as the parent, outside it, never mounted. The helper refuses
+  to start if it's missing, in another pool, or inside (or containing) the
+  parent.
 
   ```sh
   zfs set setuid=off devices=off exec=off storage/s3/buckets
+  zfs create -o canmount=off -o mountpoint=none storage/s3/trash
   ```
 
 ## API
@@ -119,7 +141,7 @@ All JSON. Errors are `{"error": "...", "code": "..."}`, where code is one of:
 | `NotFound` | 404 | |
 | `NotDataset` | 404 | the bucket isn't one of the helper's datasets, or isn't mounted |
 | `NotEmpty` | 409 | |
-| `HasHostSnapshots` | 409 | |
+| `Exists` | 409 | a bucket of that name exists (restoring from the trash) |
 | `Conflict` | 409 | |
 | `Busy` | 503 | |
 | `Internal` | 500 | |
@@ -128,7 +150,7 @@ All JSON. Errors are `{"error": "...", "code": "..."}`, where code is one of:
 | --- | --- | --- |
 | `POST /buckets/{b}/adopt` | | 201 `{"dataset"}`, or 200 if it already was one |
 | `GET /buckets/{b}` | | `{"dataset","used","referenced","refquota","available","usedbysnapshots","backup"}` |
-| `DELETE /buckets/{b}` | | 204 |
+| `DELETE /buckets/{b}` | | 200 `{"entry"}`: moved to the trash |
 | `PUT /buckets/{b}/quota` | `{"bytes": N}` | 204 |
 | `PUT /buckets/{b}/backup` | `{"include": bool}` | 204 |
 | `GET /buckets/{b}/snapshots` | | `[{"name","created","used"}]`, newest first |
@@ -137,7 +159,13 @@ All JSON. Errors are `{"error": "...", "code": "..."}`, where code is one of:
 | `GET /buckets/{b}/snapshots/{s}/list?prefix=&delimiter=/&start-after=&max-keys=` | | `{"objects":[{"key","size","modified"}],"prefixes":[],"nextStartAfter"}` |
 | `GET /buckets/{b}/snapshots/{s}/object?key=` | | the file |
 | `POST /buckets/{b}/snapshots/{s}/restore` | `{"key"}`, `{"prefix": "folder/"}` or `{"all": true}` | `{"objects": n, "skipped": n}` |
+| `GET /trash` | | `[{"entry","bucket","trashed","used","portalSnapshots","otherSnapshots"}]`, newest first |
+| `DELETE /trash/{entry}` | | 204: destroyed for good |
+| `POST /trash/{entry}/restore` | | 200 `{"bucket","dataset"}` |
 | `GET /healthz` | | `ok` |
+
+Trash entries are `<bucket>-<UTC yyyymmddThhmmssZ>`, and the helper
+accepts no other entry names.
 
 The portal's client is `ZFSHelper` in `zfsclient.go`.
 
@@ -150,6 +178,7 @@ CGO_ENABLED=0 go build -mod=vendor -trimpath -o s3-zfs-helper ./cmd/s3-zfs-helpe
 Flags:
 - `-parent`: default `storage/s3/buckets`;
 - `-root`: default `/storage/s3/buckets`;
+- `-trash`: default `storage/s3/trash`;
 - `-staging`;
 - `-state-dir`;
 - `-zfs`: default `/usr/sbin/zfs`;
@@ -210,7 +239,7 @@ Requires=s3-zfs-helper.socket
 After=zfs-mount.service s3-zfs-helper.socket
 
 [Service]
-ExecStart=/usr/local/sbin/s3-zfs-helper -parent storage/s3/buckets -root /storage/s3/buckets -staging /storage/s3/.s3-zfs-staging -state-dir /var/lib/s3-zfs-helper -zfs /usr/sbin/zfs
+ExecStart=/usr/local/sbin/s3-zfs-helper -parent storage/s3/buckets -root /storage/s3/buckets -trash storage/s3/trash -staging /storage/s3/.s3-zfs-staging -state-dir /var/lib/s3-zfs-helper -zfs /usr/sbin/zfs
 User=root
 # mount/umount (zfs create, set mountpoint, destroy): SYS_ADMIN. Setting
 # owners, modes, times and xattrs on people's files: CHOWN, FOWNER.

@@ -18,7 +18,10 @@ import (
 	"github.com/wrouesnel/versity-s3-portal/internal/zfshelper/zfstest"
 )
 
-const parent = "storage/s3/buckets"
+const (
+	parent = "storage/s3/buckets"
+	trash  = "storage/s3/trash"
+)
 
 type env struct {
 	t     *testing.T
@@ -34,7 +37,8 @@ type env struct {
 
 func (e *env) config() Config {
 	return Config{
-		Parent: parent, Root: e.root, Staging: filepath.Join(filepath.Dir(e.root), "staging"), StateDir: e.state,
+		Parent: parent, Root: e.root, Trash: trash,
+		Staging: filepath.Join(filepath.Dir(e.root), "staging"), StateDir: e.state,
 		Run: e.fake.Run, Now: func() time.Time { return e.clock },
 		// Every "dataset" here is a directory on the same filesystem.
 		SkipMountCheck: true,
@@ -48,6 +52,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fake.AddUnmounted(trash)
 	e := &env{t: t, root: root, state: filepath.Join(dir, "state"), fake: fake, clock: time.Date(2026, 11, 3, 6, 30, 0, 0, time.UTC)}
 	s := New(e.config())
 	if err := s.Check(t.Context()); err != nil {
@@ -298,6 +303,100 @@ func TestAdoptRecovery(t *testing.T) {
 	}
 }
 
+func TestTrash(t *testing.T) {
+	e := newEnv(t)
+	dir := e.mkBucket("photos")
+	e.want(201, "POST", "/buckets/photos/adopt", nil)
+	e.fake.Snapshot(parent+"/photos", "weekly_2026-11-01", e.clock)
+	e.want(201, "POST", "/buckets/photos/snapshots", zfsapi.NewSnapshot{})
+	e.want(200, "DELETE", "/buckets/photos", nil)
+	entry := "photos-20261103T063000Z"
+
+	var list []zfsapi.TrashEntry
+	json.Unmarshal(e.want(200, "GET", "/trash", nil), &list)
+	if len(list) != 1 || list[0].Entry != entry || list[0].Bucket != "photos" ||
+		!list[0].Trashed.Equal(e.clock) || list[0].PortalSnapshots != 1 || list[0].OtherSnapshots != 1 {
+		t.Fatalf("trash %+v", list)
+	}
+
+	// Restore: back in place, mounted, writable, with the gateway's xattrs.
+	json.Unmarshal(e.want(200, "POST", "/trash/"+entry+"/restore", nil), &map[string]string{})
+	if mp, ok := e.fake.Mounted(parent + "/photos"); !ok || mp != dir {
+		t.Fatalf("restored bucket mounted at %q %v", mp, ok)
+	}
+	if e.fake.Prop(parent+"/photos", "readonly") != "" {
+		t.Error("restored bucket still read-only")
+	}
+	if e.xattrs && getxattr(dir, "user.acl") != `{"Owner":"owner.alice"}` {
+		t.Errorf("gateway xattrs lost: %q", getxattr(dir, "user.acl"))
+	}
+	var snaps []zfsapi.Snapshot
+	json.Unmarshal(e.want(200, "GET", "/buckets/photos/snapshots", nil), &snaps)
+	if len(snaps) != 1 {
+		t.Errorf("snapshots after restore %+v", snaps)
+	}
+	json.Unmarshal(e.want(200, "GET", "/trash", nil), &list)
+	if len(list) != 0 {
+		t.Errorf("trash after restore %+v", list)
+	}
+
+	// Trashed again; a new bucket takes the name; restoring is refused.
+	e.clock = e.clock.Add(time.Minute)
+	e.want(200, "DELETE", "/buckets/photos", nil)
+	entry2 := "photos-20261103T063100Z"
+	e.mkBucket("photos")
+	e.want(201, "POST", "/buckets/photos/adopt", nil)
+	if out := e.want(409, "POST", "/trash/"+entry2+"/restore", nil); code(out) != zfsapi.CodeExists {
+		t.Errorf("restore over a bucket: %s", out)
+	}
+	if !e.fake.IsDataset(trash + "/" + entry2) {
+		t.Fatal("entry gone after a refused restore")
+	}
+	// A plain directory in the way also counts.
+	e.clock = e.clock.Add(time.Minute)
+	e.want(200, "DELETE", "/buckets/photos", nil)
+	os.Mkdir(dir, 0o750)
+	e.want(409, "POST", "/trash/"+entry2+"/restore", nil)
+	os.Remove(dir)
+
+	// Purging destroys it, the host's snapshots with it.
+	e.want(204, "DELETE", "/trash/"+entry2, nil)
+	if e.fake.IsDataset(trash + "/" + entry2) {
+		t.Error("purged entry still there")
+	}
+	calls := e.fake.Calls()
+	if j := strings.Join(calls[len(calls)-1], " "); j != "destroy -r "+trash+"/"+entry2 {
+		t.Errorf("purge ran %s", j)
+	}
+	json.Unmarshal(e.want(200, "GET", "/trash", nil), &list)
+	if len(list) != 1 || list[0].Entry != "photos-20261103T063200Z" {
+		t.Errorf("trash %+v", list)
+	}
+
+	for _, bad := range []string{"photos", "photos-2026", "x-20261103T063000Z", "Photos-20261103T063000Z", "photos-20261399T999999Z"} {
+		e.want(400, "DELETE", "/trash/"+bad, nil)
+		e.want(400, "POST", "/trash/"+bad+"/restore", nil)
+	}
+	e.want(404, "DELETE", "/trash/photos-20200101T000000Z", nil)
+	e.want(404, "POST", "/trash/photos-20200101T000000Z/restore", nil)
+}
+
+func TestTrashConfig(t *testing.T) {
+	e := newEnv(t)
+	for _, bad := range []string{parent + "/trash", "otherpool/trash", "storage/s3/missing", parent} {
+		c := e.config()
+		c.Trash = bad
+		if err := New(c).Check(t.Context()); err == nil {
+			t.Errorf("trash %s accepted", bad)
+		}
+	}
+	c := e.config()
+	c.Trash = ""
+	if got := New(c).Trash; got != "storage/s3/trash" {
+		t.Errorf("default trash %s", got)
+	}
+}
+
 func TestStagingMustBeOutsideRoot(t *testing.T) {
 	e := newEnv(t)
 	c := e.config()
@@ -340,29 +439,48 @@ func TestDestroy(t *testing.T) {
 	os.Remove(filepath.Join(e.root, "photos/folder"))
 	// The gateway's temp dir doesn't count.
 	os.MkdirAll(filepath.Join(e.root, "photos/.sgwtmp/multipart"), 0o700)
-	// The host's snapshots would go with it: refused.
+	// Deleting moves it to the trash, snapshots (the host's too) and all.
 	e.fake.Snapshot(parent+"/photos", "weekly_2026-11-01", e.clock)
-	if out := e.want(409, "DELETE", "/buckets/photos", nil); code(out) != zfsapi.CodeHasHostSnapshots {
-		t.Fatalf("code %s", out)
-	}
-	e.fake.Run(t.Context(), "destroy", parent+"/photos@weekly_2026-11-01")
-	// Our own snapshots go with it.
 	e.want(201, "POST", "/buckets/photos/snapshots", zfsapi.NewSnapshot{})
-	e.want(204, "DELETE", "/buckets/photos", nil)
+	var moved map[string]string
+	json.Unmarshal(e.want(200, "DELETE", "/buckets/photos", nil), &moved)
+	entry := "photos-20261103T063000Z"
+	if moved["entry"] != entry {
+		t.Fatalf("entry %v", moved)
+	}
 	if e.fake.IsDataset(parent + "/photos") {
-		t.Fatal("dataset still there")
+		t.Fatal("dataset still in the buckets")
+	}
+	if !e.fake.IsDataset(trash + "/" + entry) {
+		t.Fatal("not in the trash")
+	}
+	if _, mounted := e.fake.Mounted(trash + "/" + entry); mounted {
+		t.Error("trashed bucket still mounted")
 	}
 	if _, err := os.Lstat(filepath.Join(e.root, "photos")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("mountpoint left behind")
+		t.Error("bucket directory left behind")
+	}
+	if e.fake.Prop(trash+"/"+entry, "readonly") != "on" {
+		t.Error("trashed bucket should stay read-only")
+	}
+	var seq []string
+	for _, c := range e.fake.Calls() {
+		switch c[0] {
+		case "set", "unmount", "rename", "inherit", "destroy":
+			seq = append(seq, strings.Join(c, " "))
+		}
+	}
+	want := []string{
+		"set readonly=on " + parent + "/photos",
+		"unmount " + parent + "/photos",
+		"set canmount=off " + parent + "/photos",
+		"rename " + parent + "/photos " + trash + "/" + entry,
+		"inherit mountpoint " + trash + "/" + entry,
+	}
+	if got := strings.Join(seq[len(seq)-len(want):], "; "); got != strings.Join(want, "; ") {
+		t.Errorf("calls:\n%s\nwant:\n%s", got, strings.Join(want, "; "))
 	}
 	calls := e.fake.Calls()
-	var tail []string
-	for _, c := range calls[len(calls)-2:] {
-		tail = append(tail, strings.Join(c, " "))
-	}
-	if strings.Join(tail, "; ") != "set readonly=on "+parent+"/photos; destroy -r "+parent+"/photos" {
-		t.Errorf("last calls %v", tail)
-	}
 
 	// Something is written just before the dataset goes read-only: the
 	// second check catches it, and the dataset is made writable again.

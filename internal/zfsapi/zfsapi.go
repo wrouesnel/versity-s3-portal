@@ -20,7 +20,23 @@ var (
 	SnapshotName = regexp.MustCompile(`^s3portal-[0-9]{8}T[0-9]{6}Z(-[a-z0-9][a-z0-9-]{0,31})?$`)
 	// SnapshotLabel is the optional label at the end of a snapshot's name.
 	SnapshotLabel = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+	// TrashEntryName matches a deleted bucket's dataset in the trash:
+	// <bucket>-<UTC timestamp of the deletion>.
+	TrashEntryName = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{1,61}[a-z0-9])-([0-9]{8}T[0-9]{6}Z)$`)
 )
+
+// TrashEntry is a deleted bucket kept in the trash, GET /trash.
+type TrashEntry struct {
+	Entry   string    `json:"entry"`
+	Bucket  string    `json:"bucket"`
+	Trashed time.Time `json:"trashed"`
+	// Used counts the bucket's data and all its snapshots.
+	Used int64 `json:"used"`
+	// PortalSnapshots and OtherSnapshots count the portal's snapshots
+	// and others (the host's), which purging destroys too.
+	PortalSnapshots int `json:"portalSnapshots"`
+	OtherSnapshots  int `json:"otherSnapshots"`
+}
 
 // SnapshotTimeFormat is the timestamp in a snapshot's name.
 const SnapshotTimeFormat = "20060102T150405Z"
@@ -40,8 +56,12 @@ const (
 	CodeConflict   = "Conflict"
 	CodeInternal   = "Internal"
 	// CodeHasHostSnapshots: the bucket can't be destroyed, since that would
-	// also destroy snapshots that aren't the portal's (the host's).
+	// also destroy snapshots that aren't the portal's (the host's). Not
+	// sent since deleting moved to the trash; kept for older clients.
 	CodeHasHostSnapshots = "HasHostSnapshots"
+	// CodeExists: a bucket of that name already exists, e.g. when
+	// restoring from the trash.
+	CodeExists = "Exists"
 	// CodeBusy: too many requests are already being served.
 	CodeBusy = "Busy"
 )

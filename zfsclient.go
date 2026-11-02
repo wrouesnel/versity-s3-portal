@@ -23,6 +23,7 @@ type (
 	ZFSObject         = zfsapi.Object
 	ZFSSnapshotObject = zfsapi.ObjectList
 	ZFSRestored       = zfsapi.Restored
+	ZFSTrashEntry     = zfsapi.TrashEntry
 )
 
 // ZFSHelper talks to s3-zfs-helper, which keeps each bucket in its own ZFS
@@ -52,10 +53,12 @@ var (
 	ErrZFSNotDataset = errors.New("bucket isn't a dataset")
 	// ErrZFSNotFound: no such bucket, snapshot or object.
 	ErrZFSNotFound = errors.New("not found")
-	// ErrZFSHasHostSnapshots: the bucket can't be deleted while it has
-	// snapshots other than the portal's (the host's weekly ones), since
-	// they'd go with it. They have to be removed on the host.
+	// ErrZFSHasHostSnapshots is no longer returned: deleted buckets go to
+	// the trash with all their snapshots. Kept for older helpers.
 	ErrZFSHasHostSnapshots = errors.New("bucket has host snapshots")
+	// ErrZFSExists: a bucket of that name exists, so a trashed one can't
+	// be restored over it.
+	ErrZFSExists = errors.New("bucket exists")
 	// ErrZFSBusy: the helper is serving as many requests as it will;
 	// try again shortly.
 	ErrZFSBusy = errors.New("zfs helper busy")
@@ -71,6 +74,8 @@ func (e *ZFSError) Is(target error) bool {
 		return e.Code == zfsapi.CodeNotFound
 	case ErrZFSHasHostSnapshots:
 		return e.Code == zfsapi.CodeHasHostSnapshots
+	case ErrZFSExists:
+		return e.Code == zfsapi.CodeExists
 	case ErrZFSBusy:
 		return e.Code == zfsapi.CodeBusy
 	}
@@ -157,10 +162,32 @@ func (z *ZFSHelper) Adopt(ctx context.Context, bucket string) error {
 	return z.call(ctx, http.MethodPost, zfsPath(bucket, "adopt"), nil, nil, nil)
 }
 
-// Destroy destroys an empty bucket's dataset and its snapshots, which
-// deletes the bucket. It fails with ErrZFSNotEmpty if it has objects.
+// Destroy deletes an empty bucket by moving its dataset, with all its
+// snapshots, to the trash, unmounted and read-only; the gateway no longer
+// sees it. It fails with ErrZFSNotEmpty if it has objects.
 func (z *ZFSHelper) Destroy(ctx context.Context, bucket string) error {
 	return z.call(ctx, http.MethodDelete, zfsPath(bucket), nil, nil, nil)
+}
+
+// Trash lists deleted buckets in the trash, most recently deleted first.
+func (z *ZFSHelper) Trash(ctx context.Context) ([]ZFSTrashEntry, error) {
+	var out []ZFSTrashEntry
+	err := z.call(ctx, http.MethodGet, "/trash", nil, nil, &out)
+	return out, err
+}
+
+// PurgeTrash destroys a trashed bucket for good, with all its snapshots,
+// the host's included.
+func (z *ZFSHelper) PurgeTrash(ctx context.Context, entry string) error {
+	return z.call(ctx, http.MethodDelete, "/trash/"+url.PathEscape(entry), nil, nil, nil)
+}
+
+// RestoreTrash puts a trashed bucket's dataset back, mounted and writable
+// at its old name, with the gateway's metadata (owner, ACL, policy) on its
+// root as it was. It fails with ErrZFSExists if a bucket has that name
+// now. The caller restores whatever else it keeps about the bucket.
+func (z *ZFSHelper) RestoreTrash(ctx context.Context, entry string) error {
+	return z.call(ctx, http.MethodPost, "/trash/"+url.PathEscape(entry)+"/restore", nil, nil, nil)
 }
 
 // Info returns the bucket's space use, quota and backup flag.

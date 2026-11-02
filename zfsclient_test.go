@@ -28,7 +28,9 @@ func TestZFSHelperClient(t *testing.T) {
 	srv := zfshelper.New(zfshelper.Config{
 		Parent: "storage/s3/buckets", Root: root, Run: fake.Run, Now: func() time.Time { return clock },
 		Staging: filepath.Join(dir, "staging"), StateDir: filepath.Join(dir, "state"), SkipMountCheck: true,
+		Trash: "storage/s3/trash",
 	})
+	fake.AddUnmounted("storage/s3/trash")
 	if err := srv.Check(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -112,18 +114,40 @@ func TestZFSHelperClient(t *testing.T) {
 		t.Fatalf("destroy non-empty: %v", err)
 	}
 	fake.Snapshot("storage/s3/buckets/photos", "weekly_2026-11-01", clock)
-	if err := z.Destroy(ctx, "photos"); !errors.Is(err, ErrZFSHasHostSnapshots) {
-		t.Fatalf("destroy with host snapshots: %v", err)
-	}
-	fake.Run(ctx, "destroy", "storage/s3/buckets/photos@weekly_2026-11-01")
-	if err := z.DeleteSnapshot(ctx, "photos", snap.Name); err != nil {
-		t.Fatal(err)
-	}
 	os.Remove(filepath.Join(root, "photos", "a.txt"))
 	if err := z.Destroy(ctx, "photos"); err != nil {
 		t.Fatal(err)
 	}
 	if fake.IsDataset("storage/s3/buckets/photos") {
-		t.Fatal("still a dataset")
+		t.Fatal("still in the buckets")
+	}
+	trash, err := z.Trash(ctx)
+	if err != nil || len(trash) != 1 || trash[0].Bucket != "photos" || trash[0].PortalSnapshots != 1 || trash[0].OtherSnapshots != 1 {
+		t.Fatalf("trash %+v %v", trash, err)
+	}
+	if err := z.RestoreTrash(ctx, trash[0].Entry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := z.Info(ctx, "photos"); err != nil {
+		t.Fatal("restored bucket:", err)
+	}
+	clock = clock.Add(time.Minute)
+	if err := z.Destroy(ctx, "photos"); err != nil {
+		t.Fatal(err)
+	}
+	os.Mkdir(filepath.Join(root, "photos"), 0o750)
+	z.Adopt(ctx, "photos")
+	trash, _ = z.Trash(ctx)
+	if err := z.RestoreTrash(ctx, trash[0].Entry); !errors.Is(err, ErrZFSExists) {
+		t.Fatalf("restore over a bucket: %v", err)
+	}
+	if err := z.PurgeTrash(ctx, trash[0].Entry); err != nil {
+		t.Fatal(err)
+	}
+	if trash, _ = z.Trash(ctx); len(trash) != 0 {
+		t.Fatalf("trash after purge %+v", trash)
+	}
+	if err := z.PurgeTrash(ctx, "photos-20200101T000000Z"); !errors.Is(err, ErrZFSNotFound) {
+		t.Fatalf("purge missing: %v", err)
 	}
 }
