@@ -25,6 +25,9 @@ type Mounter interface {
 	// Unmount unmounts the bucket's dataset from its place, if it's
 	// mounted there, and removes the directory if it's empty.
 	Unmount(ctx context.Context, place, bucket string) error
+	// RootDev is the device number of the filesystem mounted at the
+	// buckets' root, as the host sees it.
+	RootDev(ctx context.Context) (uint64, error)
 }
 
 // MountClient talks to s3-zfs-mounter over its unix socket.
@@ -49,6 +52,23 @@ func (c *MountClient) Mount(ctx context.Context, place, bucket string) error {
 
 func (c *MountClient) Unmount(ctx context.Context, place, bucket string) error {
 	return c.do(ctx, "unmount", place, bucket)
+}
+
+func (c *MountClient) RootDev(ctx context.Context) (uint64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://mounter/root", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("s3-zfs-mounter: %w", err)
+	}
+	defer resp.Body.Close()
+	var root zfsapi.MountRoot
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&root) != nil {
+		return 0, fmt.Errorf("s3-zfs-mounter: GET /root: %s", resp.Status)
+	}
+	return root.Dev, nil
 }
 
 func (c *MountClient) do(ctx context.Context, op, place, bucket string) error {

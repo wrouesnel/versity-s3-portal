@@ -256,9 +256,20 @@ func (m *MountServer) mount(place, bucket string) error {
 	if e, ok := at(mounts, target); ok {
 		return &apiError{http.StatusConflict, zfsapi.CodeConflict, fmt.Sprintf("%s already has %s mounted on it", target, e.source)}
 	}
-	if err := syscall.Mkdirat(bfd, bucket, 0o700); err != nil && !errors.Is(err, syscall.EEXIST) {
+	// A directory left behind in the root would look like a bucket to the
+	// gateway: remove it if this made it and the mount doesn't happen.
+	created := false
+	if err := syscall.Mkdirat(bfd, bucket, 0o700); err == nil {
+		created = true
+	} else if !errors.Is(err, syscall.EEXIST) {
 		return fmt.Errorf("make %s: %w", target, err)
 	}
+	mounted := false
+	defer func() {
+		if created && !mounted {
+			unlinkatDir(bfd, bucket)
+		}
+	}()
 	tfd, err := syscall.Openat(bfd, bucket, dirFlags, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) {
@@ -287,9 +298,13 @@ func (m *MountServer) mount(place, bucket string) error {
 	// mountpoint isn't legacy.
 	err = m.Mount(ds, "/proc/self/fd/"+strconv.Itoa(tfd), "zfs",
 		syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, "zfsutil,mntpoint="+target)
+	if errors.Is(err, syscall.ENOENT) {
+		return notFound("no dataset %s", ds)
+	}
 	if err != nil {
 		return fmt.Errorf("mount %s at %s: %w", ds, target, err)
 	}
+	mounted = true
 	m.Log.Info("mounted", "dataset", ds, "at", target)
 	return nil
 }
@@ -333,6 +348,26 @@ func (m *MountServer) unmount(place, bucket string) error {
 	return nil
 }
 
+// rootDev is the device number of the filesystem mounted at Root, as
+// the host sees it. The helper compares it with what it sees at Root in
+// its own mount namespace, which goes stale if the host remounts the
+// parent after the helper started.
+func (m *MountServer) rootDev() (uint64, error) {
+	if err := m.checkRoot(); err != nil {
+		return 0, err
+	}
+	fd, err := openPath(m.Root)
+	if err != nil {
+		return 0, err
+	}
+	defer syscall.Close(fd)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return 0, err
+	}
+	return st.Dev, nil
+}
+
 func busy(msg string) error {
 	return &apiError{http.StatusConflict, zfsapi.CodeBusy, msg}
 }
@@ -356,6 +391,18 @@ func (m *MountServer) Handler() http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
+	mux.HandleFunc("GET /root", func(w http.ResponseWriter, r *http.Request) {
+		dev, err := m.rootDev()
+		if err != nil {
+			var ae *apiError
+			if !errors.As(err, &ae) {
+				ae = &apiError{http.StatusInternalServerError, zfsapi.CodeInternal, err.Error()}
+			}
+			writeJSON(w, ae.status, zfsapi.Error{Error: ae.msg, Code: ae.code})
+			return
+		}
+		writeJSON(w, http.StatusOK, zfsapi.MountRoot{Dev: dev})
+	})
 	h("POST /mount/{p}/{b}", m.mount)
 	h("POST /unmount/{p}/{b}", m.unmount)
 	return mux

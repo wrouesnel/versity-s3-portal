@@ -163,6 +163,11 @@ it away from everything but the buckets:
 - It unmounts only `<parent>/<bucket>` from the place asked, after the
   bucket's snapshot automounts, with `UMOUNT_NOFOLLOW`, then removes the
   directory if it's empty. Busy gets `Busy` (409).
+- If a mount fails, it removes the directory it made for it (one left in
+  `<root>` would look like a bucket to the gateway). A dataset that doesn't
+  exist gets `NotFound` (404).
+- `GET /root` gives the device number of the filesystem at `<root>` as the
+  host sees it (below).
 - It answers only connections from root and `-allow-user` (default
   `s3zfs`), checked with `SO_PEERCRED`.
 
@@ -245,6 +250,15 @@ helper never mounts, so it gets the full filesystem sandbox. Mounts the
 mounter makes on the host propagate into the helper's namespace, and so
 do the snapshot mounts ZFS makes under `.zfs/snapshot`.
 
+**A stale namespace.** The helper's namespace pins the buckets' parent as
+it was when the helper started. If the host remounts it later (a pool
+export and import, `zfs mount -a`, a pool imported or unlocked after the
+helper started), `<root>` inside the helper is the old, empty directory.
+So before every request the helper compares the device of `<root>` as it
+sees it with the mounter's `GET /root`. If they differ, it answers `Busy`
+(503), finishes what's in flight and exits non-zero; the next request
+starts it again, through its socket, with a fresh namespace.
+
 After deploying, check once: adopt a test bucket, browse a snapshot of it,
 then run `findmnt /storage/s3/buckets/<b>` on the host and in the
 gateway's container (which needs `:rslave` on its bind mount); both should
@@ -265,7 +279,8 @@ Description=s3-zfs-mounter socket
 
 [Socket]
 ListenStream=/run/s3-zfs-mounter/socket
-DirectoryMode=0750
+# The socket's own mode and SO_PEERCRED do the access control.
+DirectoryMode=0755
 SocketUser=root
 SocketGroup=s3zfs
 SocketMode=0660
@@ -319,7 +334,9 @@ Description=s3-zfs-helper socket
 
 [Socket]
 ListenStream=/run/s3-zfs-helper/socket
-DirectoryMode=0750
+# The socket's own mode does the access control. Bind-mount either the
+# directory or the socket into the portal's container.
+DirectoryMode=0755
 SocketUser=root
 SocketGroup=s3-zfs
 SocketMode=0660

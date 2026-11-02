@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -818,4 +819,26 @@ func TestSymlinksRefused(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(outside, "x.txt")); err == nil {
 		t.Error("wrote outside the bucket")
 	}
+}
+
+// The host remounted the buckets' parent after the helper started: it
+// refuses requests and asks to be restarted, once.
+func TestStaleNamespace(t *testing.T) {
+	e := newEnv(t)
+	e.mkBucket("photos")
+	e.want(201, "POST", "/buckets/photos/adopt", nil)
+	var stale atomic.Int32
+	e.s.OnStale = func() { stale.Add(1) }
+	e.s.Mount.(*zfstest.Mounter).Dev = 12345
+	for range 2 {
+		if out := e.want(503, "GET", "/buckets/photos", nil); code(out) != zfsapi.CodeBusy {
+			t.Errorf("code %s", out)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if stale.Load() != 1 {
+		t.Errorf("OnStale called %d times", stale.Load())
+	}
+	e.s.Mount.(*zfstest.Mounter).Dev = 0
+	e.want(200, "GET", "/buckets/photos", nil)
 }

@@ -66,6 +66,11 @@ type Config struct {
 	// MaxReads bounds concurrent read requests (default 8), and
 	// MaxRestores concurrent restores (default 2).
 	MaxReads, MaxRestores int
+	// OnStale is called, once, when the helper finds its mount namespace
+	// stale: the host remounted the buckets' parent after the helper
+	// started, and Root here is still the old one. The helper's main
+	// exits, so systemd starts it again with a fresh namespace.
+	OnStale func()
 	// SkipMountCheck turns off the check that a bucket's dataset is a
 	// different filesystem from its parent, for tests with a fake zfs.
 	SkipMountCheck bool
@@ -74,10 +79,11 @@ type Config struct {
 type Server struct {
 	Config
 
-	locksMu sync.Mutex
-	locks   map[string]*sync.Mutex
-	reads   chan struct{}
-	restore chan struct{}
+	staleOnce sync.Once
+	locksMu   sync.Mutex
+	locks     map[string]*sync.Mutex
+	reads     chan struct{}
+	restore   chan struct{}
 }
 
 func New(c Config) *Server {
@@ -169,6 +175,9 @@ func (s *Server) Check(ctx context.Context) error {
 	if err := s.checkTrash(ctx); err != nil {
 		return err
 	}
+	if err := s.checkFresh(ctx); err != nil {
+		return err
+	}
 	if err := ownDir(s.StateDir); err != nil {
 		return err
 	}
@@ -235,6 +244,10 @@ func (s *Server) Handler() http.Handler {
 				}
 				defer release()
 			}
+			if err := s.checkFresh(r.Context()); err != nil {
+				s.fail(w, r, err)
+				return
+			}
 			if err := fn(w, r); err != nil {
 				s.fail(w, r, err)
 			}
@@ -256,6 +269,38 @@ func (s *Server) Handler() http.Handler {
 	h("DELETE /trash/{e}", false, s.purgeTrash)
 	h("POST /trash/{e}/restore", false, s.restoreTrash)
 	return mux
+}
+
+// checkFresh checks the filesystem at Root, as this process sees it, is
+// the one the host has mounted there, as the mounter sees it. The helper
+// runs in its own mount namespace, and if the host remounts the parent
+// (pool export and import, zfs mount -a, a pool unlocked late), Root here
+// stays the old, empty directory.
+func (s *Server) checkFresh(ctx context.Context) error {
+	dev, err := s.Mount.RootDev(ctx)
+	if err != nil {
+		return err
+	}
+	fd, err := openRoot(s.Root)
+	if err != nil {
+		return err
+	}
+	var st syscall.Stat_t
+	err = syscall.Fstat(fd, &st)
+	syscall.Close(fd)
+	if err != nil {
+		return err
+	}
+	if st.Dev == dev {
+		return nil
+	}
+	s.staleOnce.Do(func() {
+		s.Log.Error("the buckets' parent was remounted on the host since the helper started; restarting for a fresh view", "root", s.Root)
+		if s.OnStale != nil {
+			go s.OnStale()
+		}
+	})
+	return &apiError{http.StatusServiceUnavailable, zfsapi.CodeBusy, "the zfs helper is restarting; try again shortly"}
 }
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {

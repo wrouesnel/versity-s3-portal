@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,6 +51,11 @@ func run() error {
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	var stale atomic.Bool
+	srv.OnStale = func() {
+		stale.Store(true)
+		stop()
+	}
 	if err := srv.Check(ctx); err != nil {
 		return err
 	}
@@ -68,6 +74,9 @@ func run() error {
 	slog.Info("serving", "addr", ln.Addr().String(), "parent", *parent, "root", *root)
 	if err := httpServer.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	if stale.Load() {
+		return fmt.Errorf("the buckets' parent was remounted on the host; exiting so systemd restarts the helper with a fresh mount namespace")
 	}
 	return nil
 }

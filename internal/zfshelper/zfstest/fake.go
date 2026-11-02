@@ -442,6 +442,21 @@ func (f *Fake) Run(ctx context.Context, args ...string) ([]byte, error) {
 type Mounter struct {
 	f                     *Fake
 	parent, root, staging string
+	// Dev, when set, is what RootDev reports instead of root's device,
+	// as if the host had remounted the parent.
+	Dev uint64
+}
+
+// RootDev is the device number of root.
+func (m *Mounter) RootDev(ctx context.Context) (uint64, error) {
+	if m.Dev != 0 {
+		return m.Dev, nil
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(m.root, &st); err != nil {
+		return 0, err
+	}
+	return st.Dev, nil
 }
 
 // Mounter makes a fake mounter for this fake's datasets.

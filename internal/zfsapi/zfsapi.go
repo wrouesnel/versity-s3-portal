@@ -150,3 +150,9 @@ const (
 
 // ValidPlace says whether p is one of the Place* constants.
 func ValidPlace(p string) bool { return p == PlaceBucket || p == PlaceStaging }
+
+// MountRoot is the mounter's GET /root: the device number of the
+// buckets' parent filesystem as the host sees it.
+type MountRoot struct {
+	Dev uint64 `json:"dev"`
+}

@@ -1,6 +1,7 @@
 package zfshelper
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,9 @@ func newMountEnv(t *testing.T) *mountEnv {
 			return []byte(b.String()), nil
 		},
 		Mount: func(source, target, fstype string, flags uintptr, data string) error {
+			if strings.HasSuffix(source, "/nosuch") {
+				return syscall.ENOENT
+			}
 			// Resolve the fd target as the kernel would.
 			real, err := os.Readlink(target)
 			if err != nil {
@@ -171,6 +175,32 @@ func TestMounter(t *testing.T) {
 	e.want(400, "mount", "bucket", "Bad_Name")
 	e.want(400, "mount", "bucket", "..%2Fetc")
 	e.want(400, "mount", "elsewhere", "photos")
+
+	// No such dataset: 404, and the directory it made is gone again, so
+	// the gateway doesn't see a bucket. One that was there stays.
+	e.want(404, "mount", "bucket", "nosuch")
+	if _, err := os.Lstat(filepath.Join(e.root, "nosuch")); !os.IsNotExist(err) {
+		t.Error("directory left behind after a failed mount")
+	}
+	os.Mkdir(filepath.Join(e.root, "nosuch"), 0o755)
+	e.want(404, "mount", "bucket", "nosuch")
+	if _, err := os.Lstat(filepath.Join(e.root, "nosuch")); err != nil {
+		t.Error("existing directory removed")
+	}
+
+	// The root's device, for the helper's staleness check.
+	resp, err := http.Get(e.srv.URL + "/root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root zfsapi.MountRoot
+	json.NewDecoder(resp.Body).Decode(&root)
+	resp.Body.Close()
+	var rst syscall.Stat_t
+	syscall.Stat(e.root, &rst)
+	if root.Dev == 0 || root.Dev != rst.Dev {
+		t.Errorf("root dev %d, want %d", root.Dev, rst.Dev)
+	}
 
 	n := len(e.mounts)
 	// The buckets' parent isn't mounted: nothing goes on the bare
