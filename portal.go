@@ -53,6 +53,10 @@ type Portal struct {
 	store *Store
 	// dir, when set, is asked about people after they log in.
 	dir Directory
+	// zfs, when set, keeps each bucket in its own ZFS dataset.
+	zfs *ZFSHelper
+	// zfsDefaults are applied to new buckets.
+	zfsDefaults ZFSDefaults
 
 	// The gateway's bucket list, kept briefly: every page and file
 	// operation checks who owns what, and listing every bucket each time
@@ -542,9 +546,15 @@ func (p *Portal) CreateBucket(ctx context.Context, u User, name string) error {
 	if err != nil {
 		return err
 	}
+	if p.zfs != nil {
+		// Give it its own dataset while it's still empty.
+		if err := p.adoptBucket(ctx, name); err != nil {
+			return err
+		}
+	}
 	slog.Info("created bucket", "user", u.Name, "bucket", name)
 	// Settings left over from an older bucket of the same name don't apply.
-	if err := p.store.PutBucketMeta(name, &BucketMeta{}); err != nil {
+	if err := p.store.PutBucketMeta(name, p.newBucketMeta()); err != nil {
 		return err
 	}
 	// So the file browser can open it.
@@ -564,7 +574,12 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 	if !v.Manage {
 		return userErr("Only the bucket's owner or an admin can delete it.")
 	}
-	err = p.vgw.DeleteBucket(ctx, name)
+	if p.zfs != nil {
+		// The gateway can't remove a mounted dataset; the helper can.
+		err = p.destroyBucket(ctx, name)
+	} else {
+		err = p.vgw.DeleteBucket(ctx, name)
+	}
 	p.forgetBuckets()
 	if IsCode(err, "BucketNotEmpty") {
 		return userErr("Bucket %q isn't empty. Delete its contents first.", name)
@@ -1125,6 +1140,17 @@ func (p *Portal) ListObjects(ctx context.Context, u User, bucket, prefix, token 
 	list, err := v.ListObjects(ctx, bucket, prefix, "/", token, pageSize)
 	if err != nil {
 		return nil, err
+	}
+	// ZFS's snapshot directory and the gateway's temporary files aren't
+	// anyone's folders (ZFS normally hides .zfs anyway).
+	if prefix == "" {
+		prefixes := list.Prefixes[:0]
+		for _, pre := range list.Prefixes {
+			if pre != ".zfs/" && pre != ".sgwtmp/" {
+				prefixes = append(prefixes, pre)
+			}
+		}
+		list.Prefixes = prefixes
 	}
 	// A folder's own marker object isn't a file in it.
 	objects := list.Objects[:0]

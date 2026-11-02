@@ -58,6 +58,25 @@ func (p *Person) User(name string) User {
 type BucketMeta struct {
 	// Groups grants each group a level of access.
 	Groups map[string]Perm `json:"groups,omitempty"`
+	// Snapshots is how often to snapshot the bucket's dataset, if ever.
+	Snapshots SnapshotSchedule `json:"snapshots,omitzero"`
+}
+
+// SnapshotSchedule takes a snapshot every Every and keeps the latest Keep.
+type SnapshotSchedule struct {
+	// Every is "hourly", "daily", "weekly", or "" for never.
+	Every string `json:"every,omitempty"`
+	Keep  int    `json:"keep,omitempty"`
+}
+
+func (m *BucketMeta) empty() bool { return len(m.Groups) == 0 && m.Snapshots.Every == "" }
+
+func copyMeta(m *BucketMeta) *BucketMeta {
+	c := &BucketMeta{Groups: map[string]Perm{}, Snapshots: m.Snapshots}
+	for g, p := range m.Groups {
+		c.Groups[g] = p
+	}
+	return c
 }
 
 // SessionRecord is a server-side login session.
@@ -361,26 +380,19 @@ func (s *Store) KnownGroups() []string {
 func (s *Store) BucketMeta(bucket string) *BucketMeta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := &BucketMeta{Groups: map[string]Perm{}}
 	if m, ok := s.state.Buckets[bucket]; ok {
-		for g, p := range m.Groups {
-			out.Groups[g] = p
-		}
+		return copyMeta(m)
 	}
-	return out
+	return &BucketMeta{Groups: map[string]Perm{}}
 }
 
 func (s *Store) PutBucketMeta(bucket string, m *BucketMeta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(m.Groups) == 0 {
+	if m.empty() {
 		delete(s.state.Buckets, bucket)
 	} else {
-		c := &BucketMeta{Groups: map[string]Perm{}}
-		for g, p := range m.Groups {
-			c.Groups[g] = p
-		}
-		s.state.Buckets[bucket] = c
+		s.state.Buckets[bucket] = copyMeta(m)
 	}
 	return s.save()
 }

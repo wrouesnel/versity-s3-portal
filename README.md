@@ -146,6 +146,25 @@ they pick.
   curl -fsS -X POST -H "Authorization: Bearer $(cat /run/secrets/s3-api-token)" \
     https://s3.example.com/api/users/alice/check
   ```
+- **ZFS** (optional, with `ZFS_HELPER_SOCKET`): every bucket is its own ZFS
+  dataset, managed by `s3-zfs-helper`, a small root service on the host
+  that the portal talks to over a unix socket (see
+  [docs/zfs-helper.md](docs/zfs-helper.md)).
+  - A new bucket is made by the gateway as usual, then moved, still empty,
+    into its own dataset with the gateway's metadata (owner, ACL, policy
+    xattrs) carried over. Deleting a bucket destroys its dataset, through
+    the helper, once it's empty.
+  - **Quotas:** admins set each bucket's size limit (ZFS `refquota`, so
+    snapshots don't count against it). New buckets get `ZFS_DEFAULT_QUOTA`.
+  - **Backups:** admins mark buckets for the host's backups. That sets the
+    ZFS user property `backupctl:include=on`, which the backup job reads.
+  - **Snapshots:** a bucket's owner or an admin sets a schedule (hourly,
+    daily or weekly, keeping the last N) and can take or delete snapshots
+    by hand. New buckets get `ZFS_DEFAULT_SNAPSHOTS`. Anyone who can read a
+    bucket can browse its snapshots and download from them. People with
+    read & write can restore a file, a folder or everything, replacing
+    what's there now (files added since are kept). The portal only touches
+    its own snapshots, named `s3portal-…`.
 - **State:** `STATE_FILE` is a JSON file with each key's owner, name and
   grants, bucket group grants, everyone the portal knows, sessions, and web
   account credentials. Key secrets live only in the gateway.
@@ -180,6 +199,9 @@ they pick.
 | `ADMIN_GROUP_DN` | Users with this group in `memberOf` are admins (default: nobody) |
 | `LDAP_GROUP_FILTER` | Finds groups to suggest for grants (default `(objectClass=posixGroup)`) |
 | `DIRECTORY_POLL_INTERVAL` | How often to check people against LDAP (default `5m`, at least `10s`) |
+| `ZFS_HELPER_SOCKET` | The `s3-zfs-helper` socket, e.g. `/run/s3-zfs-helper.sock`; turns on ZFS datasets per bucket |
+| `ZFS_DEFAULT_QUOTA` | Size limit for new buckets, e.g. `500G` (default: none) |
+| `ZFS_DEFAULT_SNAPSHOTS` | Snapshot schedule for new buckets, e.g. `daily:14` (default: none) |
 | `API_TOKEN` | At least 32 characters; enables bearer-token calls to `/api/` (or `API_TOKEN_FILE`) |
 | `OIDC_ISSUER` | The provider's issuer URL. Leave unset to turn off OIDC. |
 | `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | The portal's client at the provider (or `OIDC_CLIENT_SECRET_FILE`) |
@@ -242,6 +264,10 @@ go test ./...
 
 `TestLDAPAuthIntegration` drives a real LDAP server when the `LDAP_TEST_*`
 variables described in `ldap_integration_test.go` are set.
+
+`TestZFSAgainstGateway` runs the real `s3-zfs-helper` over its socket with
+a fake `zfs` whose datasets are directories in the gateway's root, so it
+needs `VGW_TEST_DATA` too.
 
 The gateway integration tests drive a real gateway when `VGW_TEST_S3`,
 `VGW_TEST_ADMIN`, `VGW_TEST_ACCESS` and `VGW_TEST_SECRET` are set. With

@@ -106,15 +106,158 @@
       <dt>Write only</dt><dd>Upload (a drop box): can't list, download or delete.</dd>
     </dl>
 
+    {{with .Storage}}
+    <h2>Storage</h2>
+    <dl class="storage">
+      <dt>Size</dt><dd>{{humanSize .Info.Referenced}}{{if .Info.RefQuota}} of {{humanSize .Info.RefQuota}}{{end}}{{if .Info.UsedBySnapshots}} <span class="muted small">(+ {{humanSize .Info.UsedBySnapshots}} held by snapshots)</span>{{end}}</dd>
+      <dt>Free</dt><dd>{{humanSize .Info.Available}}</dd>
+      <dt>Size limit</dt><dd>
+        {{if $.User.Admin}}
+        <form method="post" action="/buckets/quota" class="row compact">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+          <input name="quota" value="{{if .Info.RefQuota}}{{humanSize .Info.RefQuota}}{{else}}0{{end}}" aria-label="Size limit, e.g. 500G or 0 for none" placeholder="e.g. 500G, or 0">
+          <button class="ghost small">Set</button>
+        </form>
+        {{else}}{{if .Info.RefQuota}}{{humanSize .Info.RefQuota}}{{else}}none{{end}}{{end}}
+      </dd>
+      <dt>Backups</dt><dd>
+        {{if $.User.Admin}}
+        <form method="post" action="/buckets/backup" class="row compact">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+          <input type="hidden" name="include" value="{{if .Info.Backup}}off{{else}}on{{end}}">
+          <span>{{if .Info.Backup}}<span class="pill ok">included</span>{{else}}<span class="pill">not backed up</span>{{end}}</span>
+          <button class="ghost small">{{if .Info.Backup}}Stop backing up{{else}}Back this up{{end}}</button>
+        </form>
+        {{else}}{{if .Info.Backup}}<span class="pill ok">included</span>{{else}}<span class="pill">not backed up</span>{{end}}{{end}}
+      </dd>
+      <dt>Snapshots</dt><dd>
+        <form method="post" action="/buckets/schedule" class="row compact">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+          <select name="every" aria-label="How often">
+            <option value="off"{{if not .Schedule.Every}} selected{{end}}>never</option>
+            <option value="hourly"{{if eq .Schedule.Every "hourly"}} selected{{end}}>hourly</option>
+            <option value="daily"{{if eq .Schedule.Every "daily"}} selected{{end}}>daily</option>
+            <option value="weekly"{{if eq .Schedule.Every "weekly"}} selected{{end}}>weekly</option>
+          </select>
+          <label class="inline-label">keep <input name="keep" type="number" min="1" max="1000" value="{{if .Schedule.Keep}}{{.Schedule.Keep}}{{else}}7{{end}}" aria-label="How many to keep"></label>
+          <button class="ghost small">Save</button>
+          <a class="button ghost small" href="/buckets/snapshots?bucket={{$.Open.Name}}">{{len .Snapshots}} snapshots</a>
+        </form>
+      </dd>
+    </dl>
+    {{end}}
+
     <section class="danger-zone">
       <h2>Delete bucket</h2>
-      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.</p>
+      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.{{if .ZFS}} Its snapshots are deleted with it.{{end}}</p>
       <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.Open.Name}}? It has to be empty.">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
         <input type="hidden" name="name" value="{{.Open.Name}}">
         <button class="danger">Delete {{.Open.Name}}</button>
       </form>
     </section>
+
+    {{else if .Snapshots}}
+    <div class="pane-head">
+      <nav class="crumbs" aria-label="Bucket"><a href="{{browseURL .Open.Name ""}}">{{.Open.Name}}</a><span class="sep">/</span><a href="/buckets/snapshots?bucket={{.Open.Name}}" aria-current="page">Snapshots</a></nav>
+      {{if .Open.Manage}}
+      <form method="post" action="/buckets/snapshots">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input type="hidden" name="bucket" value="{{.Open.Name}}">
+        <button>Take a snapshot now</button>
+      </form>
+      {{end}}
+    </div>
+    {{with .Storage}}
+    <p class="muted">A snapshot is the whole bucket as it was at one moment. Browse one to download old files{{if $.Open.Caps.Delete}}, or restore them over what's there now{{end}}.
+      {{if .Schedule.Every}}Taken {{.Schedule.Every}}, keeping the last {{.Schedule.Keep}}.{{else}}No schedule: snapshots are only taken by hand.{{end}}</p>
+    {{if .Snapshots}}
+    <table class="snapshots">
+      <thead><tr><th>Taken</th><th>Kind</th><th class="num">Holds</th><th></th></tr></thead>
+      <tbody>
+      {{range .Snapshots}}
+      <tr>
+        <td><a class="snapshot" href="{{snapURL $.Open.Name .Name ""}}">{{.Created.Local.Format "Mon 2 Jan 2006 15:04"}}</a></td>
+        <td class="muted">{{with snapKind .Name}}{{if eq . "auto"}}scheduled{{else}}{{.}}{{end}}{{end}}</td>
+        <td class="num muted" title="Space only this snapshot holds">{{humanSize .Used}}</td>
+        <td class="actions">
+          <a class="button ghost small" href="{{snapURL $.Open.Name .Name ""}}">Browse</a>
+          {{if $.Open.Manage}}
+          <form method="post" action="/buckets/snapshots/delete" data-confirm="Delete the snapshot from {{.Created.Local.Format "2 Jan 15:04"}}? Files only it holds are gone for good.">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+            <input type="hidden" name="snapshot" value="{{.Name}}">
+            <button class="ghost danger small">Delete</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No snapshots yet.</p>
+    {{end}}
+    {{end}}
+
+    {{else if .Snap}}
+    {{$rw := covers .Open.Caps "readwrite"}}
+    <div class="pane-head">
+      <nav class="crumbs" aria-label="Folder">
+        <a href="{{snapURL .Open.Name .Snap ""}}">{{.Open.Name}}</a>{{range .Crumbs}}<span class="sep">/</span><a href="{{snapURL $.Open.Name $.Snap .Prefix}}">{{.Name}}</a>{{end}}
+      </nav>
+      <div class="row compact toolbar">
+        <a class="button ghost" href="/buckets/snapshots?bucket={{.Open.Name}}">All snapshots</a>
+        <a class="button" href="{{browseURL .Open.Name .Prefix}}">Back to now</a>
+      </div>
+    </div>
+    <p class="flash warning snapshot-banner">You're looking at <strong>{{.Open.Name}}</strong> as it was in snapshot <code>{{.Snap}}</code>. It's read only{{if $rw}}: restoring copies files back over the live bucket{{end}}.</p>
+    {{if .Listing}}
+    {{if or .Listing.Prefixes .Listing.Objects}}
+    <table class="files">
+      <thead><tr><th>Name</th><th class="num">Size</th><th class="when">Modified</th><th></th></tr></thead>
+      <tbody>
+      {{range .Listing.Prefixes}}
+      <tr>
+        <td><a class="folder" href="{{snapURL $.Open.Name $.Snap .}}">{{folderName $.Prefix .}}</a></td>
+        <td class="num muted">—</td><td class="when"></td>
+        <td class="actions">{{if $rw}}
+          <form method="post" action="/restore" data-confirm="Restore the folder {{folderName $.Prefix .}} from this snapshot, replacing the files there now?">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="snap" value="{{$.Snap}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="folder" value="{{.}}">
+            <button class="ghost small">Restore</button>
+          </form>{{end}}
+        </td>
+      </tr>
+      {{end}}
+      {{range .Listing.Objects}}
+      <tr>
+        <td><a class="file" href="/download?bucket={{$.Open.Name}}&amp;snap={{$.Snap}}&amp;key={{.Key}}" download>{{within $.Prefix .Key}}</a></td>
+        <td class="num">{{humanSize .Size}}</td>
+        <td class="when muted">{{.LastModified.Local.Format "2 Jan 2006 15:04"}}</td>
+        <td class="actions">{{if $rw}}
+          <form method="post" action="/restore" data-confirm="Restore {{within $.Prefix .Key}} from this snapshot, replacing the file there now?">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="snap" value="{{$.Snap}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="key" value="{{.Key}}">
+            <button class="ghost small">Restore</button>
+          </form>{{end}}
+        </td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{if .NextToken}}<p><a class="button ghost small" href="/files?bucket={{.Open.Name}}&amp;snap={{.Snap}}&amp;prefix={{.Prefix}}&amp;token={{.NextToken}}">Next page</a></p>{{end}}
+    {{else}}
+    <p class="empty">This folder was empty then.</p>
+    {{end}}
+    {{end}}
+    {{if and $rw (not .Prefix)}}
+    <form method="post" action="/restore" class="restore-all" data-confirm="Restore everything in {{.Open.Name}} from this snapshot? Files that exist in both are replaced; files added since are kept.">
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="bucket" value="{{.Open.Name}}"><input type="hidden" name="snap" value="{{.Snap}}"><input type="hidden" name="all" value="yes">
+      <button class="ghost">Restore everything from this snapshot</button>
+    </form>
+    {{end}}
 
     {{else}}
     {{$caps := .Open.Caps}}
@@ -138,7 +281,8 @@
             </form>
           </details>
           {{end}}
-          {{if .Open.Manage}}<a class="button ghost" href="/buckets/settings?bucket={{.Open.Name}}" title="Who has access, and deleting the bucket">Settings</a>{{end}}
+          {{if and .ZFS $caps.Read}}<a class="button ghost" href="/buckets/snapshots?bucket={{.Open.Name}}" title="Earlier versions of this bucket">Snapshots</a>{{end}}
+          {{if .Open.Manage}}<a class="button ghost" href="/buckets/settings?bucket={{.Open.Name}}" title="Who has access, size, backups, and deleting the bucket">Settings</a>{{end}}
         </div>
       </div>
       <p class="access-note muted small">

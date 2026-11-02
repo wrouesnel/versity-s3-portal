@@ -199,3 +199,12 @@ td.actions form { display: inline-flex; }
   .split { grid-template-columns: 1fr; }
   .sidebar { position: static; max-height: none; }
 }
+
+/* Storage and snapshots */
+dl.storage { margin-bottom: 20px; }
+dl.storage input:not([type=radio]):not([type=file]) { min-width: 0; flex: 0 1 120px; }
+.inline-label { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-weight: 400; }
+.inline-label input:not([type=radio]):not([type=file]) { width: 70px; margin: 0; }
+a.snapshot { font-weight: 550; color: var(--text); }
+.snapshot-banner { margin: 6px 0 14px; }
+.restore-all { margin-top: 16px; }

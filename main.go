@@ -94,6 +94,14 @@ func run() error {
 	if err != nil || pollInterval < 10*time.Second {
 		missing = append(missing, errors.New("DIRECTORY_POLL_INTERVAL must be a duration of at least 10s, e.g. 5m"))
 	}
+	var zfsDefaults ZFSDefaults
+	zfsSocket := os.Getenv("ZFS_HELPER_SOCKET")
+	if zfsSocket != "" {
+		var err1, err2 error
+		zfsDefaults.Quota, err1 = ParseSize(os.Getenv("ZFS_DEFAULT_QUOTA"))
+		zfsDefaults.Snapshots, err2 = ParseSchedule(os.Getenv("ZFS_DEFAULT_SNAPSHOTS"))
+		missing = append(missing, err1, err2)
+	}
 	var apiToken string
 	if os.Getenv("API_TOKEN") != "" || os.Getenv("API_TOKEN_FILE") != "" {
 		apiToken = secret("API_TOKEN")
@@ -151,6 +159,9 @@ func run() error {
 	if ldapAuth != nil {
 		portal.dir = ldapAuth
 	}
+	if zfsSocket != "" {
+		portal.zfs, portal.zfsDefaults = NewZFSHelper(zfsSocket), zfsDefaults
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -183,6 +194,10 @@ func run() error {
 			slog.Info("directory sync at startup", "checked", report.Checked, "changed", len(report.Changed), "disabled", report.Disabled)
 		}
 		go portal.PollDirectory(ctx, pollInterval)
+	}
+
+	if portal.zfs != nil {
+		go portal.RunSnapshots(ctx, 5*time.Minute)
 	}
 
 	sessions := &Sessions{Key: []byte(sessionKey), TTL: 12 * time.Hour, Secure: env("INSECURE_COOKIES", "") == "", Store: store}

@@ -64,6 +64,8 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 		"folderName": func(prefix, key string) string { return strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/") },
 		"join":       strings.Join,
 		"browseURL":  browseURL,
+		"snapURL":    snapURL,
+		"snapKind":   snapshotKind,
 	}).ParseFS(templateFS, "templates/*.html"))
 	return &Server{
 		Portal: portal, Auth: auth, OIDC: oidcAuth, Sessions: sessions,
@@ -117,6 +119,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /buckets/delete", s.authed(s.deleteBucket))
 	mux.HandleFunc("GET /buckets/settings", s.authedGet(s.bucketSettings))
 	mux.HandleFunc("POST /buckets/groups", s.authed(s.setGroupGrant))
+	mux.HandleFunc("POST /buckets/quota", s.authed(s.setQuota))
+	mux.HandleFunc("POST /buckets/backup", s.authed(s.setBackup))
+	mux.HandleFunc("POST /buckets/schedule", s.authed(s.setSchedule))
+	mux.HandleFunc("GET /buckets/snapshots", s.authedGet(s.snapshotsPage))
+	mux.HandleFunc("POST /buckets/snapshots", s.authed(s.takeSnapshot))
+	mux.HandleFunc("POST /buckets/snapshots/delete", s.authed(s.deleteSnapshot))
+	mux.HandleFunc("POST /restore", s.authed(s.restore))
 	mux.HandleFunc("GET /download", s.authedGet(s.download))
 	mux.HandleFunc("PUT /upload", s.authedUpload(s.upload))
 	mux.HandleFunc("POST /folders", s.authed(s.createFolder))
@@ -192,6 +201,11 @@ type page struct {
 	Settings  bool
 	GroupList []string
 	Grantees  map[string]Perm
+	// ZFS: the open bucket's dataset, and the snapshot being browsed.
+	ZFS       bool
+	Storage   *Storage
+	Snapshots bool
+	Snap      string
 	// The admin page.
 	AllKeys    []KeyEntry
 	Owners     []string
@@ -270,7 +284,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 // base fills in what every logged-in page needs.
 func (s *Server) base(w http.ResponseWriter, r *http.Request, sess *Session, tab string) page {
 	notice, errMsg := takeFlash(w, r)
-	return page{User: &sess.User, CSRF: sess.CSRF, Notice: notice, Error: errMsg, Tab: tab}
+	return page{User: &sess.User, CSRF: sess.CSRF, Notice: notice, Error: errMsg, Tab: tab, ZFS: s.Portal.zfs != nil}
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -384,6 +398,18 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request, sess *Session) {
 		return
 	}
 	p.Prefix, p.Crumbs = prefix, crumbs(prefix)
+	if snap := q.Get("snap"); snap != "" {
+		p.Snap = snap
+		list, err := s.Portal.ListSnapshot(r.Context(), sess.User, bucket, snap, prefix, q.Get("token"))
+		if err != nil {
+			p.Error = userMessage(r, sess, err)
+			s.render(w, http.StatusBadRequest, "files.html", p)
+			return
+		}
+		p.Listing, p.NextToken = list, list.NextToken
+		s.render(w, http.StatusOK, "files.html", p)
+		return
+	}
 	if p.Open.Caps.Read {
 		list, err := s.Portal.ListObjects(r.Context(), sess.User, bucket, prefix, q.Get("token"))
 		if err != nil {
@@ -428,7 +454,136 @@ func (s *Server) bucketSettings(w http.ResponseWriter, r *http.Request, sess *Se
 	p.Settings = true
 	p.Grantees = s.Portal.store.BucketMeta(bucket).Groups
 	p.GroupList = s.Portal.Groups()
+	if p.ZFS {
+		st, err := s.Portal.Storage(r.Context(), sess.User, bucket)
+		if err != nil {
+			p.Error = userMessage(r, sess, err)
+		}
+		p.Storage = st
+	}
 	s.render(w, http.StatusOK, "files.html", p)
+}
+
+func (s *Server) settingsURL(bucket string) string {
+	return "/buckets/settings?bucket=" + url.QueryEscape(bucket)
+}
+
+func (s *Server) setQuota(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket := r.PostFormValue("bucket")
+	bytes, err := ParseSize(r.PostFormValue("quota"))
+	if err != nil {
+		redirectFlash(w, r, s.settingsURL(bucket), "", "Give a size like 500G or 2T, or 0 for no limit.")
+		return
+	}
+	if err := s.Portal.SetQuota(r.Context(), sess.User, bucket, bytes); err != nil {
+		redirectFlash(w, r, s.settingsURL(bucket), "", userMessage(r, sess, err))
+		return
+	}
+	msg := "Removed the size limit."
+	if bytes > 0 {
+		msg = "Limited " + bucket + " to " + humanSize(bytes) + "."
+	}
+	redirectFlash(w, r, s.settingsURL(bucket), msg, "")
+}
+
+func (s *Server) setBackup(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket := r.PostFormValue("bucket")
+	include := r.PostFormValue("include") == "on"
+	if err := s.Portal.SetBackup(r.Context(), sess.User, bucket, include); err != nil {
+		redirectFlash(w, r, s.settingsURL(bucket), "", userMessage(r, sess, err))
+		return
+	}
+	msg := bucket + " is no longer backed up."
+	if include {
+		msg = bucket + " will be included in backups."
+	}
+	redirectFlash(w, r, s.settingsURL(bucket), msg, "")
+}
+
+func (s *Server) setSchedule(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket := r.PostFormValue("bucket")
+	spec := r.PostFormValue("every")
+	if spec != "" && spec != "off" {
+		spec += ":" + r.PostFormValue("keep")
+	}
+	sched, err := ParseSchedule(spec)
+	if err != nil {
+		redirectFlash(w, r, s.settingsURL(bucket), "", "Pick how often, and keep between 1 and 1000 snapshots.")
+		return
+	}
+	if err := s.Portal.SetSchedule(r.Context(), sess.User, bucket, sched); err != nil {
+		redirectFlash(w, r, s.settingsURL(bucket), "", userMessage(r, sess, err))
+		return
+	}
+	msg := "Scheduled snapshots are off."
+	if sched.Every != "" {
+		msg = fmt.Sprintf("Snapshots %s, keeping the last %d.", sched.Every, sched.Keep)
+	}
+	redirectFlash(w, r, s.settingsURL(bucket), msg, "")
+}
+
+func (s *Server) snapshotsURL(bucket string) string {
+	return "/buckets/snapshots?bucket=" + url.QueryEscape(bucket)
+}
+
+func (s *Server) snapshotsPage(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket := r.URL.Query().Get("bucket")
+	p := s.base(w, r, sess, "files")
+	if err := s.sidebar(r, sess, &p, bucket); err != nil {
+		redirectFlash(w, r, "/files", "", userMessage(r, sess, err))
+		return
+	}
+	p.Snapshots = true
+	st, err := s.Portal.Storage(r.Context(), sess.User, bucket)
+	if err != nil {
+		p.Error = userMessage(r, sess, err)
+	}
+	p.Storage = st
+	s.render(w, http.StatusOK, "files.html", p)
+}
+
+func (s *Server) takeSnapshot(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket := r.PostFormValue("bucket")
+	snap, err := s.Portal.TakeSnapshot(r.Context(), sess.User, bucket)
+	if err != nil {
+		redirectFlash(w, r, s.snapshotsURL(bucket), "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, s.snapshotsURL(bucket), "Took snapshot "+snap.Name+".", "")
+}
+
+func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket, snap := r.PostFormValue("bucket"), r.PostFormValue("snapshot")
+	if err := s.Portal.DeleteSnapshot(r.Context(), sess.User, bucket, snap); err != nil {
+		redirectFlash(w, r, s.snapshotsURL(bucket), "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, s.snapshotsURL(bucket), "Deleted snapshot "+snap+".", "")
+}
+
+// snapURL is the file browser's page for a folder in a snapshot.
+func snapURL(bucket, snap, prefix string) string {
+	q := url.Values{"bucket": {bucket}, "snap": {snap}}
+	if prefix != "" {
+		q.Set("prefix", prefix)
+	}
+	return "/files?" + q.Encode()
+}
+
+func (s *Server) restore(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket, snap := r.PostFormValue("bucket"), r.PostFormValue("snap")
+	key, folder, prefix := r.PostFormValue("key"), r.PostFormValue("folder"), r.PostFormValue("prefix")
+	back := snapURL(bucket, snap, prefix)
+	if key == "" && folder == "" && r.PostFormValue("all") != "yes" {
+		redirectFlash(w, r, back, "", "Pick what to restore.")
+		return
+	}
+	n, err := s.Portal.Restore(r.Context(), sess.User, bucket, snap, key, folder)
+	if err != nil {
+		redirectFlash(w, r, back, "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, back, fmt.Sprintf("Restored %d file(s) from %s.", n, snap), "")
 }
 
 func (s *Server) setGroupGrant(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -456,10 +611,18 @@ func unlimited(w http.ResponseWriter) {
 
 func (s *Server) download(w http.ResponseWriter, r *http.Request, sess *Session) {
 	q := r.URL.Query()
-	bucket, key := q.Get("bucket"), q.Get("key")
-	resp, err := s.Portal.GetObject(r.Context(), sess.User, bucket, key)
+	bucket, key, snap := q.Get("bucket"), q.Get("key"), q.Get("snap")
+	var resp *http.Response
+	var err error
+	back := browseURL(bucket, parentPrefix(key))
+	if snap != "" {
+		resp, err = s.Portal.GetSnapshotObject(r.Context(), sess.User, bucket, snap, key)
+		back = snapURL(bucket, snap, parentPrefix(key))
+	} else {
+		resp, err = s.Portal.GetObject(r.Context(), sess.User, bucket, key)
+	}
 	if err != nil {
-		redirectFlash(w, r, browseURL(bucket, parentPrefix(key)), "", userMessage(r, sess, err))
+		redirectFlash(w, r, back, "", userMessage(r, sess, err))
 		return
 	}
 	defer resp.Body.Close()
