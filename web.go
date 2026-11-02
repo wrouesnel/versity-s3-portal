@@ -578,12 +578,16 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, sess *Session) 
 		redirectFlash(w, r, back, "", "Pick what to restore.")
 		return
 	}
-	n, err := s.Portal.Restore(r.Context(), sess.User, bucket, snap, key, folder)
+	res, err := s.Portal.Restore(r.Context(), sess.User, bucket, snap, key, folder)
 	if err != nil {
 		redirectFlash(w, r, back, "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, back, fmt.Sprintf("Restored %d file(s) from %s.", n, snap), "")
+	msg := fmt.Sprintf("Restored %d file(s) from %s.", res.Objects, snap)
+	if res.Skipped > 0 {
+		msg += fmt.Sprintf(" %d with names too long to restore were skipped.", res.Skipped)
+	}
+	redirectFlash(w, r, back, msg, "")
 }
 
 func (s *Server) setGroupGrant(w http.ResponseWriter, r *http.Request, sess *Session) {

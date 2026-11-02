@@ -300,40 +300,50 @@ func (p *Portal) GetSnapshotObject(ctx context.Context, u User, bucket, snap, ke
 
 // Restore copies a file, a folder, or (with both empty) everything back
 // from a snapshot, replacing what's there now. It needs read & write.
-func (p *Portal) Restore(ctx context.Context, u User, bucket, snap, key, prefix string) (int, error) {
+func (p *Portal) Restore(ctx context.Context, u User, bucket, snap, key, prefix string) (ZFSRestored, error) {
 	if p.zfs == nil {
-		return 0, errNoZFS
+		return ZFSRestored{}, errNoZFS
 	}
 	v, err := p.Bucket(ctx, u, bucket, true)
 	if err != nil {
-		return 0, err
+		return ZFSRestored{}, err
 	}
 	if !v.Caps.Covers(PermReadWrite.Caps()) {
-		return 0, userErr("Restoring replaces files, so it needs read & write access to %s.", bucket)
+		return ZFSRestored{}, userErr("Restoring replaces files, so it needs read & write access to %s.", bucket)
 	}
-	var n int
+	var r ZFSRestored
 	switch {
 	case key != "":
 		if err := checkKey(key); err != nil {
-			return 0, err
+			return r, err
 		}
-		n, err = 1, p.zfs.RestoreObject(ctx, bucket, snap, key)
+		if err = p.zfs.RestoreObject(ctx, bucket, snap, key); err == nil {
+			r.Objects = 1
+		}
 	case prefix != "":
 		if err := checkPrefix(prefix); err != nil {
-			return 0, err
+			return r, err
 		}
-		n, err = p.zfs.RestorePrefix(ctx, bucket, snap, prefix)
+		r, err = p.zfs.RestorePrefix(ctx, bucket, snap, prefix)
 	default:
-		n, err = p.zfs.RestoreAll(ctx, bucket, snap)
-	}
-	if errors.Is(err, ErrZFSNotFound) {
-		return 0, userErr("That isn't in the snapshot.")
+		r, err = p.zfs.RestoreAll(ctx, bucket, snap)
 	}
 	if err != nil {
-		return 0, err
+		return r, zfsUserError(err)
 	}
-	slog.Warn("restored from snapshot", "user", u.Name, "bucket", bucket, "snapshot", snap, "key", key, "prefix", prefix, "objects", n)
-	return n, nil
+	slog.Warn("restored from snapshot", "user", u.Name, "bucket", bucket, "snapshot", snap, "key", key, "prefix", prefix, "objects", r.Objects, "skipped", r.Skipped)
+	return r, nil
+}
+
+// zfsUserError turns the helper's errors people can act on into messages.
+func zfsUserError(err error) error {
+	switch {
+	case errors.Is(err, ErrZFSNotFound):
+		return userErr("That isn't there any more.")
+	case errors.Is(err, ErrZFSBusy):
+		return userErr("Storage is busy with other restores and downloads. Try again in a minute.")
+	}
+	return err
 }
 
 // RunSnapshots takes scheduled snapshots and prunes old ones, checking

@@ -26,11 +26,17 @@ func TestZFSAgainstGateway(t *testing.T) {
 	if data == "" {
 		t.Skip("VGW_TEST_DATA not set")
 	}
+	os.MkdirAll(filepath.Join(filepath.Dir(data), ".s3-zfs-staging"), 0o700)
 	fake, err := zfstest.New("storage/s3/buckets", data)
 	ok(t, "fake zfs", err)
 	clock := time.Now().UTC()
 	fake.Now = func() time.Time { return clock }
-	helper := zfshelper.New(zfshelper.Config{Parent: "storage/s3/buckets", Root: data, Run: fake.Run, Now: func() time.Time { return clock }})
+	helper := zfshelper.New(zfshelper.Config{
+		Parent: "storage/s3/buckets", Root: data, Run: fake.Run, Now: func() time.Time { return clock },
+		Staging: filepath.Join(filepath.Dir(data), ".s3-zfs-staging"), StateDir: t.TempDir(),
+		// The fake's datasets are directories on the same filesystem.
+		SkipMountCheck: true,
+	})
 	sock := filepath.Join(t.TempDir(), "helper.sock")
 	l, err := net.Listen("unix", sock)
 	ok(t, "listen", err)
@@ -93,10 +99,10 @@ func TestZFSAgainstGateway(t *testing.T) {
 	}
 	_, err = p.Restore(ctx, bob, bucket, snap.Name, "doc.txt", "")
 	userError(t, "read-only bob restores", err)
-	n, err := p.Restore(ctx, alice, bucket, snap.Name, "doc.txt", "")
+	res, err := p.Restore(ctx, alice, bucket, snap.Name, "doc.txt", "")
 	ok(t, "alice restores", err)
-	if body, err := getObject(ctx, key, bucket, "doc.txt"); err != nil || body != "version one" || n != 1 {
-		t.Fatalf("after restore: %q %v (%d)", body, err, n)
+	if body, err := getObject(ctx, key, bucket, "doc.txt"); err != nil || body != "version one" || res.Objects != 1 {
+		t.Fatalf("after restore: %q %v (%+v)", body, err, res)
 	}
 
 	// Quotas and backups are for admins.
