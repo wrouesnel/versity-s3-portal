@@ -1,11 +1,16 @@
 {{template "header" .}}
-<section class="card narrow">
-  <h1>Log in</h1>
-  <p class="muted">Use your usual username and password.</p>
-  <form method="post" action="/login">
-    <label>Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+<section class="card narrow login">
+  <h1>Sign in</h1>
+  {{if .OIDCName}}
+  <p><a class="button wide" href="/auth/login" data-full>Sign in with {{.OIDCName}}</a></p>
+  {{end}}
+  {{if and .OIDCName .PasswordLogin}}<p class="or"><span>or use your password</span></p>{{end}}
+  {{if .PasswordLogin}}
+  <form method="post" action="/login" data-full>
+    <label>Username <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required {{if not .OIDCName}}autofocus{{end}}></label>
     <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-    <button>Log in</button>
+    <button class="wide">Sign in</button>
   </form>
+  {{end}}
 </section>
 {{template "footer" .}}

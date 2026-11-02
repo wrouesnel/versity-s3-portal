@@ -1,51 +1,52 @@
 {{template "header" .}}
 <section class="card">
-  <h1>Buckets</h1>
+  <div class="card-head">
+    <h1>Buckets</h1>
+    <form method="post" action="/buckets" class="row compact">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input name="name" placeholder="new-bucket-name" aria-label="New bucket name" pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" title="3 to 63 lowercase letters, digits and hyphens" autocapitalize="none" spellcheck="false" required>
+      <button>Create</button>
+    </form>
+  </div>
   {{if .Buckets}}
-  <ul class="rows">
+  <ul class="list">
     {{range .Buckets}}
     <li>
-      <a href="/browse?bucket={{.}}"><code>{{.}}</code></a>
-      <form method="post" action="/buckets/delete" class="inline" data-confirm="Delete the bucket {{.}}? It has to be empty.">
+      <a class="bucket" href="/browse?bucket={{.}}">{{.}}</a>
+      <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.}}? It has to be empty.">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <input type="hidden" name="name" value="{{.}}">
-        <button class="danger small">Delete</button>
+        <button class="ghost danger small">Delete</button>
       </form>
     </li>
     {{end}}
   </ul>
-  <p class="muted">Open a bucket to browse, upload and delete its files. A bucket can only be deleted once it's empty.</p>
   {{else}}
-  <p class="muted">No buckets yet.</p>
+  <p class="empty">No buckets yet. Name one above to make it.</p>
   {{end}}
-  <form method="post" action="/buckets" class="row">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <input name="name" placeholder="new-bucket-name" aria-label="New bucket name" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]" title="3 to 63 lowercase letters, digits and hyphens" required>
-    <button>Create bucket</button>
-  </form>
 </section>
 
 <section class="card">
-  <h1>Access keys</h1>
-  <p class="muted">Each key only reaches the buckets you give it. Make one per app or device, so you can revoke it on its own.</p>
+  <div class="card-head">
+    <h1>Access keys</h1>
+    <a class="button" href="/keys/new">New key</a>
+  </div>
+  <p class="muted">Each key reaches only the buckets you give it. Make one per app or device, so you can revoke it on its own.</p>
   {{if .Keys}}
   <table class="keys">
     <thead><tr><th>Name</th><th>Access key ID</th><th>Buckets</th><th></th></tr></thead>
     <tbody>
     {{range .Keys}}
     <tr>
-      <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
-      <td><code>{{.Access}}</code></td>
-      <td>
-        {{if .Buckets}}{{range $b, $p := .Buckets}}<div><code>{{$b}}</code> <span class="muted">{{permLabel $p}}</span></div>{{end}}
-        {{else}}<span class="muted">none</span>{{end}}
-      </td>
+      <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
+      <td><code class="copy">{{.Access}}</code></td>
+      <td>{{template "perms" .Buckets}}</td>
       <td class="actions">
-        <a class="button small" href="/keys/edit?access={{.Access}}">Edit</a>
-        <form method="post" action="/keys/delete" class="inline" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
+        <a class="button ghost small" href="/keys/edit?access={{.Access}}">Edit</a>
+        <form method="post" action="/keys/delete" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <input type="hidden" name="access" value="{{.Access}}">
-          <button class="danger small">Revoke</button>
+          <button class="ghost danger small">Revoke</button>
         </form>
       </td>
     </tr>
@@ -53,14 +54,13 @@
     </tbody>
   </table>
   {{end}}
-  <p><a class="button" href="/keys/new">New access key</a></p>
 </section>
 
-<section class="card">
-  <h1>Connecting</h1>
+<section class="card subtle">
+  <h2>Connecting</h2>
   <dl>
-    <dt>Endpoint</dt><dd><code>{{.S3URL}}</code></dd>
-    <dt>Region</dt><dd><code>{{.Region}}</code></dd>
+    <dt>Endpoint</dt><dd><code class="copy">{{.S3URL}}</code></dd>
+    <dt>Region</dt><dd><code class="copy">{{.Region}}</code></dd>
     <dt>Addressing</dt><dd>Path style</dd>
   </dl>
 </section>

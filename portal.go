@@ -45,6 +45,38 @@ type Portal struct {
 	mu    sync.Mutex
 	vgw   *VGW
 	store *Store
+
+	// The gateway's bucket list, kept briefly: every page and file
+	// operation checks who owns what, and listing every bucket each time
+	// is most of the latency. The portal drops it whenever it creates or
+	// deletes a bucket; only buckets changed behind its back can be stale,
+	// for at most bucketCacheTTL.
+	cacheMu      sync.Mutex
+	bucketCache  []Bucket
+	bucketCached time.Time
+}
+
+const bucketCacheTTL = 5 * time.Second
+
+// listBuckets is the gateway's bucket list, from the cache when it's fresh.
+func (p *Portal) listBuckets(ctx context.Context) ([]Bucket, error) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	if p.bucketCache != nil && time.Since(p.bucketCached) < bucketCacheTTL {
+		return p.bucketCache, nil
+	}
+	buckets, err := p.vgw.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p.bucketCache, p.bucketCached = buckets, time.Now()
+	return buckets, nil
+}
+
+func (p *Portal) forgetBuckets() {
+	p.cacheMu.Lock()
+	p.bucketCache = nil
+	p.cacheMu.Unlock()
 }
 
 func NewPortal(vgw *VGW, store *Store) *Portal {
@@ -93,7 +125,7 @@ func (p *Portal) ensureOwner(ctx context.Context, u User) error {
 
 // Buckets returns the names of the buckets u owns.
 func (p *Portal) Buckets(ctx context.Context, u User) ([]string, error) {
-	buckets, err := p.vgw.ListBuckets(ctx)
+	buckets, err := p.listBuckets(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +169,25 @@ func (p *Portal) Key(u User, access string) (*Key, error) {
 	return &copied, nil
 }
 
+// BindSubject ties username to an OIDC identity the first time it logs in,
+// and refuses a different identity later.
+func (p *Portal) BindSubject(username, subject string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	bound, ok := p.store.Subject(username)
+	if ok {
+		if bound != subject {
+			return userErr("The username %q already belongs to a different account. Ask an admin for help.", username)
+		}
+		return nil
+	}
+	if err := p.store.PutSubject(username, subject); err != nil {
+		return err
+	}
+	slog.Info("bound username to OIDC identity", "user", username, "subject", subject)
+	return nil
+}
+
 func (p *Portal) CreateBucket(ctx context.Context, u User, name string) error {
 	if !bucketRe.MatchString(name) {
 		return userErr("Bucket names are 3 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.")
@@ -147,6 +198,7 @@ func (p *Portal) CreateBucket(ctx context.Context, u User, name string) error {
 		return err
 	}
 	err := p.vgw.CreateBucket(ctx, name, ownerAccess(u.Name))
+	p.forgetBuckets()
 	if IsCode(err, "BucketAlreadyExists") || IsCode(err, "BucketAlreadyOwnedByYou") {
 		return userErr("A bucket called %q already exists.", name)
 	}
@@ -172,6 +224,7 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 		return userErr("No such bucket.")
 	}
 	err = p.vgw.DeleteBucket(ctx, name)
+	p.forgetBuckets()
 	if IsCode(err, "BucketNotEmpty") {
 		return userErr("Bucket %q isn't empty. Delete its contents first.", name)
 	}
@@ -190,15 +243,18 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 	return nil
 }
 
-// checkGrants makes sure u owns every bucket in grants.
+// checkGrants makes sure u owns every bucket in grants. It asks the gateway
+// rather than the cache, since it decides what a key can reach.
 func (p *Portal) checkGrants(ctx context.Context, u User, grants map[string]Perm) error {
-	owned, err := p.Buckets(ctx, u)
+	all, err := p.vgw.ListBuckets(ctx)
 	if err != nil {
 		return err
 	}
 	ownedSet := map[string]bool{}
-	for _, b := range owned {
-		ownedSet[b] = true
+	for _, b := range all {
+		if b.Owner == ownerAccess(u.Name) {
+			ownedSet[b.Name] = true
+		}
 	}
 	for b, perm := range grants {
 		if !ownedSet[b] || !perm.Valid() {

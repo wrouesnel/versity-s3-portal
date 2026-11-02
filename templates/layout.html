@@ -3,28 +3,36 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .Refresh}}<meta http-equiv="refresh" content="0; url={{.Refresh}}">{{end}}
 <title>{{.Title}}</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/app.js" defer></script>
+<link rel="icon" href="{{asset "bucket.svg"}}" type="image/svg+xml">
+<link rel="stylesheet" href="{{asset "style.css"}}">
+<script src="{{asset "app.js"}}" defer></script>
 </head>
 <body>
-<header>
-  <a class="brand" href="/">{{.Title}}</a>
-  {{if .User}}
-  <nav class="links">
-    <a href="/">Buckets &amp; keys</a>
-    {{if .User.Admin}}<a href="/admin">Admin</a>{{end}}
-  </nav>
-  <form method="post" action="/logout" class="inline">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <span class="who">{{.User.Name}}</span>
-    <button class="link">Log out</button>
-  </form>
-  {{end}}
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="/"><span class="logo" aria-hidden="true"></span>{{.Title}}</a>
+    {{if .User}}
+    <nav class="links" aria-label="Main">
+      <a href="/">Buckets &amp; keys</a>
+      {{if .User.Admin}}<a href="/admin">Admin</a>{{end}}
+    </nav>
+    <form method="post" action="/logout" class="who">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <span class="avatar" aria-hidden="true">{{slice .User.Name 0 1}}</span>
+      <span class="name">{{.User.Name}}</span>
+      <button class="ghost small">Log out</button>
+    </form>
+    {{end}}
+  </div>
+  <div class="loading" aria-hidden="true"></div>
 </header>
 <main>
-{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
-{{if .Notice}}<p class="notice" role="status">{{.Notice}}</p>{{end}}
+<div id="flash">
+{{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
+{{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
+</div>
 {{end}}
 
 {{define "footer"}}
@@ -53,3 +61,5 @@
 <p class="muted">You don't have any buckets yet. You can create the key now and give it access later.</p>
 {{end}}
 {{end}}
+
+{{define "perms"}}{{if .}}<ul class="perms">{{range $b, $p := .}}<li><code>{{$b}}</code> <span class="pill {{$p}}">{{permLabel $p}}</span></li>{{end}}</ul>{{else}}<span class="muted">no buckets</span>{{end}}{{end}}

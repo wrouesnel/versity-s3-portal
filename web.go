@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -26,18 +28,26 @@ var templateFS embed.FS
 var staticFS embed.FS
 
 type Server struct {
-	Portal     *Portal
-	Auth       Authenticator
+	Portal *Portal
+	// Auth checks passwords; nil when only OIDC is configured.
+	Auth Authenticator
+	// OIDC is nil when only passwords are configured.
+	OIDC       *OIDCAuth
 	Sessions   *Sessions
 	Title      string
 	S3URL      string
 	Region     string
 	tmpl       *template.Template
 	failedWait time.Duration
+	// assetPrefix is /static/<hash of the static files>/, so they can be
+	// cached for good and still change with each release.
+	assetPrefix string
 }
 
-func NewServer(portal *Portal, auth Authenticator, sessions *Sessions, title, s3URL, region string) *Server {
+func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions *Sessions, title, s3URL, region string) *Server {
+	assetPrefix := "/static/" + staticHash() + "/"
 	tmpl := template.Must(template.New("").Funcs(template.FuncMap{
+		"asset": func(name string) string { return assetPrefix + name },
 		"permLabel": func(p Perm) string {
 			if p == PermReadWrite {
 				return "read & write"
@@ -47,21 +57,51 @@ func NewServer(portal *Portal, auth Authenticator, sessions *Sessions, title, s3
 		"humanSize": humanSize,
 		// within shows a key or folder relative to the folder being browsed.
 		"within": func(prefix, key string) string { return strings.TrimPrefix(key, prefix) },
+		// folderName is a subfolder's name without its trailing slash.
+		"folderName": func(prefix, key string) string { return strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/") },
 	}).ParseFS(templateFS, "templates/*.html"))
 	return &Server{
-		Portal: portal, Auth: auth, Sessions: sessions,
+		Portal: portal, Auth: auth, OIDC: oidcAuth, Sessions: sessions,
 		Title: title, S3URL: s3URL, Region: region,
-		tmpl: tmpl, failedWait: time.Second,
+		tmpl: tmpl, failedWait: time.Second, assetPrefix: assetPrefix,
 	}
+}
+
+// staticHash is a short hash of everything under static/.
+func staticHash() string {
+	h := sha256.New()
+	fs.WalkDir(staticFS, "static", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := staticFS.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s %d\n", name, len(data))
+		h.Write(data)
+		return nil
+	})
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 func (s *Server) Handler() http.Handler {
 	static, _ := fs.Sub(staticFS, "static")
 	mux := http.NewServeMux()
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+	files := http.FileServerFS(static)
+	mux.Handle("GET "+s.assetPrefix, http.StripPrefix(s.assetPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		files.ServeHTTP(w, r)
+	})))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /{$}", s.home)
-	mux.HandleFunc("POST /login", s.login)
+	if s.Auth != nil {
+		mux.HandleFunc("POST /login", s.login)
+	}
+	if s.OIDC != nil {
+		mux.HandleFunc("GET /auth/login", s.oidcLogin)
+		mux.HandleFunc("GET /auth/callback", s.oidcCallback)
+	}
 	mux.HandleFunc("POST /logout", s.authed(s.logout))
 	mux.HandleFunc("POST /buckets", s.authed(s.createBucket))
 	mux.HandleFunc("POST /buckets/delete", s.authed(s.deleteBucket))
@@ -89,15 +129,21 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		// Pages hold secrets and per-person data. Static files set their own.
 		h.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
 }
 
 type page struct {
-	Title   string
-	S3URL   string
-	Region  string
+	Title  string
+	S3URL  string
+	Region string
+	// The login page's choices.
+	PasswordLogin bool
+	OIDCName      string
+	// Refresh, when set, sends the browser on to this page.
+	Refresh string
 	User    *User
 	CSRF    string
 	Error   string
@@ -128,6 +174,10 @@ type crumb struct {
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, p page) {
 	p.Title, p.S3URL, p.Region = s.Title, s.S3URL, s.Region
+	p.PasswordLogin = s.Auth != nil
+	if s.OIDC != nil {
+		p.OIDCName = s.OIDC.Name
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if err := s.tmpl.ExecuteTemplate(w, name, p); err != nil {

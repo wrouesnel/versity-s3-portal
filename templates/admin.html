@@ -8,17 +8,14 @@
     {{range .AllKeys}}
     <tr>
       <td>{{.Owner}}</td>
-      <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
+      <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
       <td><code>{{.Access}}</code></td>
-      <td>
-        {{if .Buckets}}{{range $b, $p := .Buckets}}<div><code>{{$b}}</code> <span class="muted">{{permLabel $p}}</span></div>{{end}}
-        {{else}}<span class="muted">none</span>{{end}}
-      </td>
+      <td>{{template "perms" .Buckets}}</td>
       <td class="actions">
-        <form method="post" action="/admin/revoke" class="inline" data-confirm="Revoke {{.Owner}}'s key {{.Label}}?">
+        <form method="post" action="/admin/revoke" data-confirm="Revoke {{.Owner}}'s key {{.Label}}?">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <input type="hidden" name="access" value="{{.Access}}">
-          <button class="danger small">Revoke</button>
+          <button class="ghost danger small">Revoke</button>
         </form>
       </td>
     </tr>
@@ -26,7 +23,7 @@
     </tbody>
   </table>
   {{else}}
-  <p class="muted">Nobody has any keys.</p>
+  <p class="empty">Nobody has any keys.</p>
   {{end}}
 </section>
 
@@ -34,14 +31,14 @@
 <section class="card">
   <h1>Revoke someone's keys</h1>
   <p class="muted">Revokes every key the person has made. They can still log in and make new ones while they're in the S3 users group.</p>
-  <ul class="rows">
+  <ul class="list">
     {{range .Owners}}
     <li>
       <span>{{.}}</span>
-      <form method="post" action="/admin/revoke-user" class="inline" data-confirm="Revoke all of {{.}}'s keys?">
+      <form method="post" action="/admin/revoke-user" data-confirm="Revoke all of {{.}}'s keys?">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <input type="hidden" name="owner" value="{{.}}">
-        <button class="danger small">Revoke all of {{.}}'s keys</button>
+        <button class="ghost danger small">Revoke all of {{.}}'s keys</button>
       </form>
     </li>
     {{end}}

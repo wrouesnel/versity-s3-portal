@@ -146,7 +146,7 @@ func TestStore(t *testing.T) {
 
 func TestCSRFAndAuthRequired(t *testing.T) {
 	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
-	srv := NewServer(nil, nil, sessions, "t", "https://s3", "us-east-1")
+	srv := NewServer(nil, stubAuth{}, nil, sessions, "t", "https://s3", "us-east-1")
 	h := srv.Handler()
 
 	rec := httptest.NewRecorder()
@@ -172,7 +172,7 @@ func TestCSRFAndAuthRequired(t *testing.T) {
 
 func TestAdminAndUploadGuards(t *testing.T) {
 	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: time.Hour}
-	h := NewServer(nil, nil, sessions, "t", "https://s3", "us-east-1").Handler()
+	h := NewServer(nil, stubAuth{}, nil, sessions, "t", "https://s3", "us-east-1").Handler()
 	login := httptest.NewRecorder()
 	sessions.Start(login, User{Name: "alice", UID: 1001, GID: 1001})
 	cookie := login.Result().Cookies()[0]

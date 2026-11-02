@@ -41,6 +41,11 @@ type state struct {
 	Keys map[string]*Key `json:"keys"`
 	// Web is each person's web account, by username.
 	Web map[string]*WebAccount `json:"web,omitempty"`
+	// Subjects binds each username that has logged in with OIDC to the
+	// provider's identity for them, so a second identity that maps to the
+	// same username (a renamed account, or the same email local part at
+	// another domain) can't take over their buckets and keys.
+	Subjects map[string]string `json:"subjects,omitempty"`
 }
 
 // Store is a JSON file of issued keys. Callers serialise access.
@@ -50,7 +55,7 @@ type Store struct {
 }
 
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path, state: state{Keys: map[string]*Key{}, Web: map[string]*WebAccount{}}}
+	s := &Store{path: path, state: state{Keys: map[string]*Key{}, Web: map[string]*WebAccount{}, Subjects: map[string]string{}}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -66,6 +71,9 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if s.state.Web == nil {
 		s.state.Web = map[string]*WebAccount{}
+	}
+	if s.state.Subjects == nil {
+		s.state.Subjects = map[string]string{}
 	}
 	return s, nil
 }
@@ -121,6 +129,17 @@ func (s *Store) PutWeb(user string, w *WebAccount) error {
 
 func (s *Store) DeleteWeb(user string) error {
 	delete(s.state.Web, user)
+	return s.save()
+}
+
+// Subject returns the OIDC identity bound to user, if any.
+func (s *Store) Subject(user string) (string, bool) {
+	sub, ok := s.state.Subjects[user]
+	return sub, ok
+}
+
+func (s *Store) PutSubject(user, subject string) error {
+	s.state.Subjects[user] = subject
 	return s.save()
 }
 

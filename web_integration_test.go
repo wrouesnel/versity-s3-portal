@@ -36,7 +36,7 @@ func TestWebAgainstGateway(t *testing.T) {
 	ok(t, "create bucket", p.CreateBucket(ctx, user, bucket))
 
 	sessions := &Sessions{Key: []byte("0123456789abcdef0123456789abcdef"), TTL: 3600e9}
-	srv := httptest.NewServer(NewServer(p, stubAuth{user}, sessions, "t", "https://s3", "us-east-1").Handler())
+	srv := httptest.NewServer(NewServer(p, stubAuth{user}, nil, sessions, "t", "https://s3", "us-east-1").Handler())
 	defer srv.Close()
 	jar, _ := cookiejar.New(nil)
 	c := &http.Client{Jar: jar}
