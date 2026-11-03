@@ -1,0 +1,24 @@
+# TLS for both: signed requests go to the gateway, the rest to the portal
+# (site.conf). It lives in versitygw's network namespace, so it serves the
+# ports versitygw.container publishes, and restarts with it.
+[Unit]
+Description=s3-tls: TLS for versitygw and s3-key-portal
+BindsTo=versitygw.service
+After=versitygw.service
+PartOf=versitygw.service
+
+[Container]
+ContainerName=s3-tls
+Image=docker.io/library/nginx:1.31.8
+Network=container:versitygw
+Exec=nginx -c /etc/nginx/site/nginx.conf
+Volume=/etc/s3-tls:/etc/nginx/site:ro
+Volume=/etc/localtime:/etc/localtime:ro
+
+[Service]
+Restart=always
+# After renewing the certificate: systemctl reload s3-tls
+ExecReload=/usr/bin/podman kill --signal HUP s3-tls
+
+[Install]
+WantedBy=multi-user.target

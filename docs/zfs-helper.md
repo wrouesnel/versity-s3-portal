@@ -264,137 +264,14 @@ then run `findmnt /storage/s3/buckets/<b>` on the host and in the
 gateway's container (which needs `:rslave` on its bind mount); both should
 show the dataset with `nosuid,nodev,noexec`.
 
-Make a group for the helper's socket, and give the portal's container that
-group (`--group-add s3-zfs`):
-
-```sh
-groupadd --system s3-zfs
-```
-
-`/etc/systemd/system/s3-zfs-mounter.socket`:
-
-```ini
-[Unit]
-Description=s3-zfs-mounter socket
-
-[Socket]
-ListenStream=/run/s3-zfs-mounter/socket
-# The socket's own mode and SO_PEERCRED do the access control.
-DirectoryMode=0755
-SocketUser=root
-SocketGroup=s3zfs
-SocketMode=0660
-RemoveOnStop=yes
-
-[Install]
-WantedBy=sockets.target
-```
-
-`/etc/systemd/system/s3-zfs-mounter.service`:
-
-```ini
-[Unit]
-Description=s3-zfs-mounter: mounts S3 buckets' datasets for s3-zfs-helper
-Requires=s3-zfs-mounter.socket
-After=zfs-mount.service s3-zfs-mounter.socket
-
-[Service]
-ExecStart=/usr/local/sbin/s3-zfs-mounter -parent storage/s3/buckets -root /storage/s3/buckets -staging /storage/s3/.s3-zfs-staging -allow-user s3zfs
-User=root
-# Mounting, nothing else. No DAC capabilities: it uses only root-owned
-# directories, as their owner.
-CapabilityBoundingSet=CAP_SYS_ADMIN
-AmbientCapabilities=
-NoNewPrivileges=yes
-# No devices at all, /dev/zfs above all: it can't run a ZFS command, and
-# it can't make itself a /dev/zfs either.
-DevicePolicy=closed
-# No mount namespace (see above), so no ProtectSystem= and friends.
-RestrictAddressFamilies=AF_UNIX
-IPAddressDeny=any
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service @mount
-SystemCallErrorNumber=EPERM
-UMask=0077
-MemoryMax=128M
-TasksMax=32
-LimitNOFILE=1024
-```
-
-`/etc/systemd/system/s3-zfs-helper.socket`:
-
-```ini
-[Unit]
-Description=s3-zfs-helper socket
-
-[Socket]
-ListenStream=/run/s3-zfs-helper/socket
-# The socket's own mode does the access control. Bind-mount either the
-# directory or the socket into the portal's container.
-DirectoryMode=0755
-SocketUser=root
-SocketGroup=s3-zfs
-SocketMode=0660
-RemoveOnStop=yes
-
-[Install]
-WantedBy=sockets.target
-```
-
-`/etc/systemd/system/s3-zfs-helper.service`:
-
-```ini
-[Unit]
-Description=s3-zfs-helper: ZFS datasets for S3 buckets
-Requires=s3-zfs-helper.socket s3-zfs-mounter.socket
-After=zfs-mount.service s3-zfs-helper.socket s3-zfs-mounter.socket
-
-[Service]
-ExecStart=/usr/local/sbin/s3-zfs-helper -parent storage/s3/buckets -root /storage/s3/buckets -trash storage/s3/trash -staging /storage/s3/.s3-zfs-staging -state-dir /var/lib/s3-zfs-helper -mounter /run/s3-zfs-mounter/socket -zfs /usr/sbin/zfs
-User=s3zfs
-Group=s3zfs
-StateDirectory=s3-zfs-helper
-StateDirectoryMode=0700
-# Owners, modes, times and xattrs on people's files: CHOWN, FOWNER.
-# Reading and writing in people's directories: DAC_OVERRIDE,
-# DAC_READ_SEARCH. No SYS_ADMIN: ZFS checks the zfs allow grants.
-CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
-NoNewPrivileges=yes
-DevicePolicy=closed
-DeviceAllow=/dev/zfs rw
-# With DAC_OVERRIDE it could write anywhere it can see; it sees only the
-# buckets and staging as writable.
-ProtectSystem=strict
-ReadWritePaths=/storage/s3/buckets /storage/s3/.s3-zfs-staging
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-RestrictAddressFamilies=AF_UNIX
-IPAddressDeny=any
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service @chown @file-system
-SystemCallErrorNumber=EPERM
-UMask=0077
-MemoryMax=512M
-TasksMax=64
-LimitNOFILE=4096
-```
+The units, with the groups, directories and grants they need, are in
+[../deploy](../deploy/README.md): `deploy/files/etc/systemd/system/` and
+`deploy/files/etc/tmpfiles.d/`. The socket directories come from
+tmpfiles rather than `DirectoryMode=`, which systemd applies only to a
+directory it creates itself. The portal's container gets the `s3-zfs`
+group (`--group-add`) for the helper's socket, and binds
+`/run/s3-zfs-helper`, the directory, so restarting the socket doesn't
+strand its mount.
 
 ### Limits
 

@@ -1,0 +1,45 @@
+[Unit]
+Description=s3-zfs-helper: ZFS datasets for S3 buckets
+Requires=s3-zfs-helper.socket s3-zfs-mounter.socket
+After=zfs-mount.service s3-zfs-helper.socket s3-zfs-mounter.socket
+
+[Service]
+ExecStart=/usr/local/sbin/s3-zfs-helper -parent storage/s3/buckets -root /storage/s3/buckets -trash storage/s3/trash -staging /storage/s3/.s3-zfs-staging -state-dir /var/lib/s3-zfs-helper -mounter /run/s3-zfs-mounter/socket -zfs /usr/sbin/zfs
+User=s3zfs
+Group=s3zfs
+StateDirectory=s3-zfs-helper
+StateDirectoryMode=0700
+# Owners, modes, times and xattrs on people's files: CHOWN, FOWNER.
+# Reading and writing in people's directories: DAC_OVERRIDE,
+# DAC_READ_SEARCH. No SYS_ADMIN: ZFS checks the zfs allow grants.
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=/dev/zfs rw
+# With DAC_OVERRIDE it could write anywhere it can see; it sees only the
+# buckets and staging as writable. The mounter's mounts propagate in.
+ProtectSystem=strict
+ReadWritePaths=/storage/s3/buckets /storage/s3/.s3-zfs-staging
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @chown @file-system
+SystemCallErrorNumber=EPERM
+UMask=0077
+MemoryMax=512M
+TasksMax=64
+LimitNOFILE=4096

@@ -1,0 +1,15 @@
+[Unit]
+Description=s3-zfs-mounter socket
+
+[Socket]
+# The directory comes from tmpfiles.d/s3-zfs-mounter.conf.
+ListenStream=/run/s3-zfs-mounter/socket
+# The socket's mode and the mounter's SO_PEERCRED check do the access
+# control.
+SocketUser=root
+SocketGroup=s3zfs
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

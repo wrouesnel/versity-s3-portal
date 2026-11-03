@@ -206,7 +206,7 @@ they pick.
 | `ADMIN_GROUP_DN` | Users with this group in `memberOf` are admins (default: nobody) |
 | `LDAP_GROUP_FILTER` | Finds groups to suggest for grants (default `(objectClass=posixGroup)`) |
 | `DIRECTORY_POLL_INTERVAL` | How often to check people against LDAP (default `5m`, at least `10s`) |
-| `ZFS_HELPER_SOCKET` | The `s3-zfs-helper` socket, e.g. `/run/s3-zfs-helper.sock`; turns on ZFS datasets per bucket |
+| `ZFS_HELPER_SOCKET` | The `s3-zfs-helper` socket, e.g. `/run/s3-zfs-helper/helper.sock`; turns on ZFS datasets per bucket |
 | `ZFS_DEFAULT_QUOTA` | Size limit for new buckets, e.g. `500G` (default: none) |
 | `ZFS_DEFAULT_SNAPSHOTS` | Snapshot schedule for new buckets, e.g. `daily:14` (default: none) |
 | `API_TOKEN` | At least 32 characters; enables bearer-token calls to `/api/` (or `API_TOKEN_FILE`) |
@@ -247,6 +247,13 @@ reach (for example a `0700` root-owned directory). The gateway runs as root
 and follows symlinks when reading, so someone who can write into their own
 bucket directory on the host could otherwise read any file the gateway can,
 including its IAM file of secrets.
+
+## Deploying
+
+[deploy/](deploy/README.md) describes a whole install: the three
+containers, the two host services, and every file, directory, secret,
+user, dataset and grant, with its owner and mode, and the order to set
+them up.
 
 ## The web UI
 

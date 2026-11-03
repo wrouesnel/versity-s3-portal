@@ -1,0 +1,32 @@
+# The S3 gateway. s3-tls shares its network namespace and serves 80 and
+# 443 on its behalf; the gateway's own ports, the S3 API (7070) and the
+# admin API only the portal uses (7071), listen on the private network
+# alone and aren't published.
+[Unit]
+Description=versitygw S3 gateway
+# Bucket datasets mount at boot before the gateway looks at its root.
+After=zfs-mount.service
+
+[Container]
+ContainerName=versitygw
+Image=docker.io/versity/versitygw:v1.10.0
+Network=s3.network
+IP=10.89.40.10
+PublishPort=80:80
+PublishPort=443:443
+# ROOT_ACCESS_KEY_ID and ROOT_SECRET_ACCESS_KEY.
+EnvironmentFile=/storage/s3/secrets/versitygw.env
+# rslave: bucket datasets mounted after the gateway starts appear here too.
+Volume=/storage/s3/buckets:/data:rslave
+Volume=/storage/s3/iam:/iam
+Volume=/etc/localtime:/etc/localtime:ro
+# --iam-cache-disable: 1.10.0's IAM cache drops the uid/gid of newly
+# created accounts, so new keys would write files as root for up to 2m.
+# --chuid --chgid: files are owned by the uid/gid of the key's person.
+Exec=--port 10.89.40.10:7070 --admin-port 10.89.40.10:7071 --iam-dir /iam --iam-cache-disable posix --chuid --chgid --dir-perms 0750 --file-perms 0640 /data
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

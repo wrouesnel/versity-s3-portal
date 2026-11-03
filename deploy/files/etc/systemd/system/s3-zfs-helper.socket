@@ -1,0 +1,13 @@
+[Unit]
+Description=s3-zfs-helper socket
+
+[Socket]
+# The directory comes from tmpfiles.d/s3-zfs-helper.conf.
+ListenStream=/run/s3-zfs-helper/helper.sock
+SocketUser=root
+SocketGroup=s3-zfs
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

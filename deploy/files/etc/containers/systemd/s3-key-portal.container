@@ -1,0 +1,41 @@
+# The portal. Reached only through s3-tls.
+[Unit]
+Description=s3-key-portal
+Wants=versitygw.service s3-zfs-helper.socket
+After=versitygw.service s3-zfs-helper.socket
+
+[Container]
+ContainerName=s3-key-portal
+# Built from this repository: podman build -t localhost/s3-key-portal:<commit> .
+Image=localhost/s3-key-portal:COMMIT
+Network=s3.network
+IP=10.89.40.11
+# The s3-zfs group's gid on the host (getent group s3-zfs), so the portal
+# may use s3-zfs-helper's socket. The image runs as nobody (65534).
+# podman 4.9's Quadlet has no GroupAdd=; newer ones do.
+PodmanArgs=--group-add=S3_ZFS_GID
+# VGW_ROOT_ACCESS, VGW_ROOT_SECRET, SESSION_KEY, API_TOKEN, and
+# LDAP_BIND_PASSWORD or OIDC_CLIENT_SECRET.
+EnvironmentFile=/storage/s3/secrets/s3-key-portal.env
+Environment=VGW_S3_ENDPOINT=http://10.89.40.10:7070
+Environment=VGW_ADMIN_ENDPOINT=http://10.89.40.10:7071
+Environment=STATE_FILE=/state/state.json
+Environment=ZFS_HELPER_SOCKET=/run/s3-zfs-helper/helper.sock
+Environment=PUBLIC_S3_URL=https://s3.example.com
+# The directory: see the README's configuration table for the rest, and
+# for OIDC instead of or as well as LDAP.
+Environment=LDAP_URL=ldaps://ldap.example.com:636
+Environment=LDAP_BASE_DN=dc=example,dc=com
+Environment=LDAP_BIND_DN=cn=s3-key-portal,dc=example,dc=com
+Environment=ALLOWED_GROUP_DN=ou=s3-users,ou=groups,dc=example,dc=com
+Environment=ADMIN_GROUP_DN=ou=s3-admin,ou=groups,dc=example,dc=com
+Volume=/storage/s3/portal:/state
+# The directory, not the socket: see tmpfiles.d/s3-zfs-helper.conf.
+Volume=/run/s3-zfs-helper:/run/s3-zfs-helper
+Volume=/etc/localtime:/etc/localtime:ro
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

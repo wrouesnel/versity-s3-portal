@@ -1,0 +1,8 @@
+# The three containers' private network. Fixed addresses, since s3-tls
+# picks its upstream per request and nginx resolves no names then.
+# Nothing here is reachable from outside the host except the ports
+# versitygw.container publishes, which s3-tls serves.
+[Network]
+NetworkName=s3
+Subnet=10.89.40.0/24
+Gateway=10.89.40.1
