@@ -6,9 +6,10 @@ After=zfs-mount.service s3-zfs-mounter.socket
 [Service]
 ExecStart=/usr/local/sbin/s3-zfs-mounter -parent storage/s3/buckets -root /storage/s3/buckets -staging /storage/s3/.s3-zfs-staging -allow-user s3zfs
 User=root
-# Mounting, nothing else. No DAC capabilities: it uses only root-owned
-# directories, as their owner.
-CapabilityBoundingSet=CAP_SYS_ADMIN
+# Mounting, and looking up paths: a bucket's root belongs to its owner,
+# and unmounting the snapshots ZFS mounted under its .zfs means searching
+# it. No other DAC capabilities: everything it writes is root's.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
 AmbientCapabilities=
 NoNewPrivileges=yes
 # No devices at all, /dev/zfs above all: it can't run a ZFS command.

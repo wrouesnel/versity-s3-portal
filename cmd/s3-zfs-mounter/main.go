@@ -1,7 +1,7 @@
 // s3-zfs-mounter mounts and unmounts S3 buckets' ZFS datasets for
 // s3-zfs-helper, which runs unprivileged and so can't. It runs as root
-// with CAP_SYS_ADMIN only and no access to /dev/zfs, so it can't run a
-// single ZFS command: all it can do is mount a bucket's dataset in the
+// with CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH only and no access to
+// /dev/zfs, so it can't run a single ZFS command: all it can do is mount a bucket's dataset in the
 // bucket's directory or in staging, and unmount it. It serves a tiny API
 // on a unix socket, passed in by systemd socket activation or made with
 // -socket, and answers only the helper's user (and root). See
@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	warnCaps()
 	srv := zfshelper.NewMountServer(zfshelper.MountConfig{Parent: *parent, Root: *root, Staging: *staging})
 	if err := srv.Check(); err != nil {
 		return err
@@ -134,4 +136,33 @@ func listener(path string) (net.Listener, error) {
 	old := syscall.Umask(0o177)
 	defer syscall.Umask(old)
 	return net.Listen("unix", path)
+}
+
+// warnCaps logs the capabilities it should have and doesn't.
+// CAP_DAC_READ_SEARCH is how it reaches snapshots mounted under a
+// bucket's .zfs, since the bucket's root belongs to its owner; without
+// it, deleting a bucket fails once anyone has browsed its snapshots.
+func warnCaps() {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		hex, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		eff, err := strconv.ParseUint(strings.TrimSpace(hex), 16, 64)
+		if err != nil {
+			return
+		}
+		for _, c := range []struct {
+			bit  uint
+			name string
+		}{{21, "CAP_SYS_ADMIN"}, {2, "CAP_DAC_READ_SEARCH"}} {
+			if eff&(1<<c.bit) == 0 {
+				slog.Warn("missing a capability: add it to the unit's CapabilityBoundingSet=", "capability", c.name)
+			}
+		}
+	}
 }

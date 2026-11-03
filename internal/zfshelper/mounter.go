@@ -328,8 +328,18 @@ func (m *MountServer) unmount(place, bucket string) error {
 		// Snapshots ZFS mounted under .zfs/snapshot hold it busy.
 		for _, s := range mounts {
 			if strings.HasPrefix(s.mountpoint, target+"/.zfs/snapshot/") && strings.HasPrefix(s.source, ds+"@") {
-				if err := m.Unmount(s.mountpoint, umountNoFollow); err != nil && !errors.Is(err, syscall.EINVAL) {
-					return busy(fmt.Sprintf("unmount snapshot %s: %v", s.source, err))
+				err := m.Unmount(s.mountpoint, umountNoFollow)
+				switch {
+				case err == nil, errors.Is(err, syscall.EINVAL):
+					// Gone already: ZFS expires them.
+				case errors.Is(err, syscall.EBUSY):
+					return busy(fmt.Sprintf("snapshot %s is in use", s.source))
+				case errors.Is(err, syscall.EACCES):
+					// Reaching .zfs means searching the bucket's root, which
+					// belongs to its owner.
+					return fmt.Errorf("unmount snapshot %s: %w (the mounter needs CAP_DAC_READ_SEARCH)", s.source, err)
+				default:
+					return fmt.Errorf("unmount snapshot %s: %w", s.source, err)
 				}
 			}
 		}

@@ -173,6 +173,8 @@ func TestZFSAgainstGateway(t *testing.T) {
 		t.Fatalf("deleted bucket isn't in the trash: %+v", trash)
 	}
 	userError(t, "owner restores", p.RestoreTrash(ctx, alice, entry))
+	userError(t, "restore no entry", p.RestoreTrash(ctx, admin, ""))
+	userError(t, "purge no entry", p.PurgeTrash(ctx, admin, ""))
 	ok(t, "admin restores", p.RestoreTrash(ctx, admin, entry))
 	bs, err := p.Buckets(ctx, alice)
 	ok(t, "buckets after restore", err)

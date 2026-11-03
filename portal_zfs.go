@@ -423,6 +423,9 @@ func (p *Portal) RestoreTrash(ctx context.Context, u User, entry string) error {
 	if !u.Admin {
 		return userErr("Only admins can restore deleted buckets.")
 	}
+	if entry == "" {
+		return userErr("Choose a deleted bucket.")
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	err := p.zfs.RestoreTrash(ctx, entry)
@@ -450,6 +453,9 @@ func (p *Portal) PurgeTrash(ctx context.Context, u User, entry string) error {
 	}
 	if !u.Admin {
 		return userErr("Only admins can purge deleted buckets.")
+	}
+	if entry == "" {
+		return userErr("Choose a deleted bucket.")
 	}
 	if err := p.zfs.PurgeTrash(ctx, entry); err != nil {
 		return zfsUserError(err)

@@ -26,7 +26,8 @@ they pick.
   - Root (uid or gid 0) is always refused.
   - With glauth's PAM backend, the search account must be in its
     `groupWithSearchCapability` group, and group DNs look like
-    `ou=<group>,ou=groups,<base DN>`.
+    `ou=<group>,ou=groups,<base DN>`. Users need a `uid`
+    attribute, which glauth 2.3 emits only with `nameformat = "uid"`.
 - **OIDC login** (optional, alongside or instead of LDAP): the
   authorization code flow with PKCE, a nonce, and a signed short-lived cookie
   holding the flow's state.

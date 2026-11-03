@@ -24,13 +24,16 @@ the reference files at the paths they're installed to, so
             │                                               │ /run/s3-zfs-mounter/socket
             ▼                                               ▼
    storage/s3/buckets/<bucket> datasets  ◀── mounts ── s3-zfs-mounter (host, root,
-   storage/s3/trash/<bucket>-<time>                      CAP_SYS_ADMIN only)
+   storage/s3/trash/<bucket>-<time>                      mount and look up only)
 ```
 
 - **Containers** (Quadlet, rootful podman): `versitygw`, `s3-key-portal`
-  and `s3-tls`, on a private network `s3` (10.89.40.0/24). Only 80 and 443
-  are published. The gateway's admin API is reachable only from that
-  network.
+  and `s3-tls`, on a network `s3` (10.89.40.0/24). Only 80 and 443 are
+  published, so nothing off the host reaches the gateway's own ports or
+  the portal directly. The host and its other containers can: podman
+  doesn't isolate its networks from each other. Nothing depends on that
+  isolation: the gateway's APIs, the admin API included, need signed
+  requests, and the portal trusts nothing about where a request came from.
 - **Host services** (systemd, socket-activated): `s3-zfs-helper` and
   `s3-zfs-mounter`. They're optional: without them every bucket is a
   plain directory and the portal has no quotas, snapshots, backup flag or
@@ -43,7 +46,8 @@ The files use these. Change them consistently everywhere they appear.
 
 | Name | Meaning |
 | --- | --- |
-| `/storage/s3` | The service's directory, on the same pool as the datasets |
+| `/storage` | Where the pool's root dataset is mounted |
+| `/storage/s3` | The service's directory, a plain directory there |
 | `storage/s3/buckets` | The buckets' parent dataset, mounted at `/storage/s3/buckets` |
 | `storage/s3/trash` | Deleted buckets, in the same pool, outside the parent, never mounted |
 | `10.89.40.0/24`, `.10`, `.11` | The `s3` network, the gateway's and the portal's addresses |
@@ -78,7 +82,7 @@ The files use these. Change them consistently everywhere they appear.
 | `/storage/s3` | root, 0755 | The service's directory |
 | `/storage/s3/buckets` | root, **0700** | The buckets' parent dataset's mount. Must stay root 0700: the gateway runs as root and follows symlinks, so anyone who could reach a bucket directory could plant one and read anything through it |
 | `/storage/s3/buckets/<bucket>` | the bucket's owner | Each bucket's dataset, made by the helper and mounted by the mounter |
-| `/storage/s3/.s3-zfs-staging` | root, **0700** | Where the helper sets up a new dataset before it goes in place. Must be root 0700, outside the buckets, on the same filesystem as them |
+| `/storage/s3/.s3-zfs-staging` | root, **0700** | Where a new dataset is mounted to be set up before it goes in place. Must be root 0700 and outside the buckets |
 | `/storage/s3/iam` | root, 0700 | The gateway's accounts, secrets included |
 | `/storage/s3/portal` | 65534, 0700 | The portal's state file |
 | `/storage/s3/secrets` | root, 0700 | The secrets below |
@@ -141,11 +145,13 @@ Run as root, in this order.
    parent dataset, without quotas or snapshots of their own; only buckets
    made after this get datasets.
 
-   Consider the module parameter `zfs_snapshot_no_setuid=1`
-   (`/etc/modprobe.d/zfs.conf`, and
+   On ZFS 2.3 or later, consider the module parameter
+   `zfs_snapshot_no_setuid=1` (`/etc/modprobe.d/zfs.conf`, and
    `/sys/module/zfs/parameters/zfs_snapshot_no_setuid` until the next
-   boot): ZFS mounts snapshots under `.zfs/snapshot` with `suid` unless
-   it's set.
+   boot). ZFS mounts the snapshots people browse under `.zfs/snapshot`
+   itself, with `suid` unless it's set, and never with `nodev` or
+   `noexec`. Earlier versions, such as Ubuntu 24.04's 2.2, don't have it.
+   The gateway serves files without running them either way.
 
 3. **Directories.**
 
@@ -158,7 +164,10 @@ Run as root, in this order.
 4. **Secrets.** Made once, never printed. `printf` is the shell's
    builtin, so the values don't appear on a command line.
 
+   In a subshell, so the `cd` and `umask` don't carry into later steps:
+
    ```sh
+   (
    cd /storage/s3/secrets && umask 077
    for s in root-access root-secret session-key; do
        [ -e "$s" ] || head -c 30 /dev/urandom | base64 | tr -dc A-Za-z0-9 > "$s"
@@ -168,29 +177,36 @@ Run as root, in this order.
        "$(cat root-access)" "$(cat root-secret)" > versitygw.env
    printf 'VGW_ROOT_ACCESS=%s\nVGW_ROOT_SECRET=%s\nSESSION_KEY=%s\nAPI_TOKEN=%s\n' \
        "$(cat root-access)" "$(cat root-secret)" "$(cat session-key)" "$(cat api-token)" > s3-key-portal.env
+   )
    ```
 
    Then add `LDAP_BIND_PASSWORD=<the search account's password>` (or
    `OIDC_CLIENT_SECRET=…`) to `s3-key-portal.env` with an editor, and put
    the certificate and key in `/etc/s3-tls/tls/`.
 
-5. **Binaries and images.** From a checkout of this repository at the
-   commit being deployed:
+5. **Binaries and images.** In a checkout of this repository at the
+   commit being deployed, as root (`sudo -i`, then `cd` to it). Git
+   refuses to work in a checkout another user owns, so take the commit
+   from the checkout's owner, and build the binaries outside it:
 
    ```sh
-   podman build -t localhost/s3-key-portal:$(git rev-parse HEAD) .
-   podman build --target zfs-helper --output type=local,dest=out .
-   install -o root -g root -m 0755 out/s3-zfs-helper out/s3-zfs-mounter /usr/local/sbin/
+   COMMIT=$(sudo -u "$(stat -c %U .)" git rev-parse HEAD)
+   podman build -t localhost/s3-key-portal:$COMMIT .
+   out=$(mktemp -d)
+   podman build --target zfs-helper --output type=local,dest=$out .
+   install -o root -g root -m 0755 $out/s3-zfs-helper $out/s3-zfs-mounter /usr/local/sbin/
+   rm -r $out
    ```
 
    Pin every image by version (`versitygw:v1.10.0`, `nginx:1.31.8`), never
    `latest`.
 
-6. **Files.** Copy `files/` into place, then set `COMMIT`, `S3_ZFS_GID`,
-   the host name and the directory settings in `s3-key-portal.container`.
+6. **Files.** Still in the checkout, copy `deploy/files/` into place,
+   then set `COMMIT`, `S3_ZFS_GID`, the host name and the directory
+   settings in `/etc/containers/systemd/s3-key-portal.container`.
 
    ```sh
-   cp -r files/etc/. /etc/
+   cp -r deploy/files/etc/. /etc/
    systemd-tmpfiles --create /etc/tmpfiles.d/s3-zfs-mounter.conf /etc/tmpfiles.d/s3-zfs-helper.conf
    systemctl daemon-reload
    ```
@@ -221,16 +237,24 @@ Run as root, in this order.
   Then `findmnt /storage/s3/buckets/<bucket>` on the host and
   `findmnt -N "$(podman inspect -f '{{.State.Pid}}' versitygw)" /data/<bucket>`
   in the gateway's container should both show the dataset with
-  `nosuid,nodev,noexec`.
+  `nosuid,nodev,noexec`. The snapshot mounts nested under it, at
+  `.zfs/snapshot/<name>`, show only `ro` (see step 2).
 - Delete the bucket, and restore it from Admin → Deleted buckets.
 
 ## Without ZFS
 
-Skip the users, datasets, grants, staging directory, binaries and the
-`s3-zfs-*` and `tmpfiles.d` files. Make `/storage/s3/buckets` an ordinary
-root 0700 directory, and from `s3-key-portal.container` remove
-`ZFS_HELPER_SOCKET`, the `--group-add` line, the `/run/s3-zfs-helper`
-volume and `s3-zfs-helper.socket` from `Wants=` and `After=`.
+Skip the users, datasets, grants, staging directory and binaries. Make
+`/storage/s3/buckets` an ordinary root 0700 directory. In step 6, copy
+only the containers and the TLS config:
+
+```sh
+cp -r deploy/files/etc/containers deploy/files/etc/s3-tls /etc/
+```
+
+and from `s3-key-portal.container` remove `ZFS_HELPER_SOCKET`, the
+`--group-add` line, the `/run/s3-zfs-helper` volume, and
+`s3-zfs-helper.socket` from `Wants=` and `After=`. In step 7, start only
+the containers.
 
 ## Upgrading
 

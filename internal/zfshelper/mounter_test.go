@@ -154,6 +154,25 @@ func TestMounter(t *testing.T) {
 	e.failUnmount = nil
 	e.want(204, "unmount", "bucket", "photos")
 
+	// A snapshot it can't reach (no CAP_DAC_READ_SEARCH, in a bucket
+	// owned by someone else) is an error, not Busy; one in use is Busy.
+	// Either way the bucket stays mounted.
+	e.want(204, "mount", "bucket", "photos")
+	e.table = append(e.table, mountEntry{mountpoint: snap, fstype: "zfs", source: parent + "/photos@s3portal-20261103T000000Z"})
+	e.failUnmount = map[string]error{snap: syscall.EACCES}
+	if body := e.want(500, "unmount", "bucket", "photos"); !strings.Contains(body, "CAP_DAC_READ_SEARCH") {
+		t.Errorf("unreachable snapshot: %s", body)
+	}
+	e.failUnmount = map[string]error{snap: syscall.EBUSY}
+	if body := e.want(409, "unmount", "bucket", "photos"); !strings.Contains(body, zfsapi.CodeBusy) {
+		t.Errorf("busy snapshot: %s", body)
+	}
+	if _, ok := at(e.table, dir); !ok {
+		t.Error("bucket unmounted after its snapshot failed")
+	}
+	e.failUnmount = nil
+	e.want(204, "unmount", "bucket", "photos")
+
 	// Something else mounted there isn't ours to unmount, nor to mount on.
 	os.Mkdir(filepath.Join(e.root, "other"), 0o700)
 	e.table = append(e.table, mountEntry{mountpoint: filepath.Join(e.root, "other"), fstype: "tmpfs", source: "tmpfs"})

@@ -19,9 +19,10 @@ it away from everything but the buckets:
   `devices`.
 - **s3-zfs-mounter** does its mounting. ZFS's only privilege check is
   `CAP_SYS_ADMIN`: a process holding it bypasses `zfs allow` and controls
-  every pool, and mounting needs it. So the mounter has `CAP_SYS_ADMIN` and
-  nothing else, and no access to `/dev/zfs`, so it can't run a single ZFS
-  command. All it can do is mount `<parent>/<bucket>` on
+  every pool, and mounting needs it. So the mounter has `CAP_SYS_ADMIN`,
+  plus `CAP_DAC_READ_SEARCH` to reach snapshot mounts inside buckets that
+  belong to their owners, and no access to `/dev/zfs`, so it can't run a
+  single ZFS command. All it can do is mount `<parent>/<bucket>` on
   `<root>/<bucket>` or `<staging>/<bucket>`, paths it works out itself, and
   unmount it again.
 
@@ -204,8 +205,8 @@ it away from everything but the buckets:
 
 - The staging directory (`-staging`, default `.s3-zfs-staging` beside
   `-root`) must be outside the buckets tree, owned by root and 0700: the
-  mounter has no file capabilities, so it can only use the directory as
-  its owner. The mounter makes it if it's missing and refuses to start
+  mounter can't write in anyone else's directories, so it can only use
+  this one as its owner. The mounter makes it if it's missing and refuses to start
   otherwise. The helper reaches it through `CAP_DAC_READ_SEARCH`.
 - The state directory (`-state-dir`, default `/var/lib/s3-zfs-helper`)
   must be owned by `s3zfs` and 0700 (`StateDirectory=` does this).
@@ -286,5 +287,7 @@ strand its mount.
   bucket before being refused on the parent. It's allowed to destroy each
   bucket, so that's inherent.
 - The mounter is still root with `CAP_SYS_ADMIN`. It can't touch ZFS, but
-  a bug in it could mount over other paths. It's kept small, takes no
+  a bug in it could mount over other paths. `CAP_DAC_READ_SEARCH` lets it
+  read any file, which adds little to that, and nothing the helper can't
+  already read. It's kept small, takes no
   paths, and its syscall filter allows only `@system-service` and `@mount`.
