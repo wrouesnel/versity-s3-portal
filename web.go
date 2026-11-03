@@ -262,7 +262,8 @@ func (s *Server) authed(h handler) http.HandlerFunc {
 	})
 }
 
-const genericError = "Something went wrong talking to the storage gateway. Try again, and ask for help if it keeps happening."
+// Not "the gateway": it may be the directory, the ZFS helper or the portal.
+const genericError = "Something went wrong on the server. Try again, and ask for help if it keeps happening."
 
 // userMessage is what to tell the user about err: user errors as they are,
 // anything else logged and reported generically.

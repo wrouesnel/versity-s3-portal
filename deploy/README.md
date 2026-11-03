@@ -164,7 +164,8 @@ Run as root, in this order.
 4. **Secrets.** Made once, never printed. `printf` is the shell's
    builtin, so the values don't appear on a command line.
 
-   In a subshell, so the `cd` and `umask` don't carry into later steps:
+   In a subshell, so the `cd` and `umask` don't carry into later steps.
+   It leaves files that already exist alone, so rerunning it is safe:
 
    ```sh
    (
@@ -173,9 +174,9 @@ Run as root, in this order.
        [ -e "$s" ] || head -c 30 /dev/urandom | base64 | tr -dc A-Za-z0-9 > "$s"
    done
    [ -e api-token ] || head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9 > api-token
-   printf 'ROOT_ACCESS_KEY_ID=%s\nROOT_SECRET_ACCESS_KEY=%s\n' \
+   [ -e versitygw.env ] || printf 'ROOT_ACCESS_KEY_ID=%s\nROOT_SECRET_ACCESS_KEY=%s\n' \
        "$(cat root-access)" "$(cat root-secret)" > versitygw.env
-   printf 'VGW_ROOT_ACCESS=%s\nVGW_ROOT_SECRET=%s\nSESSION_KEY=%s\nAPI_TOKEN=%s\n' \
+   [ -e s3-key-portal.env ] || printf 'VGW_ROOT_ACCESS=%s\nVGW_ROOT_SECRET=%s\nSESSION_KEY=%s\nAPI_TOKEN=%s\n' \
        "$(cat root-access)" "$(cat root-secret)" "$(cat session-key)" "$(cat api-token)" > s3-key-portal.env
    )
    ```
@@ -258,11 +259,32 @@ the containers.
 
 ## Upgrading
 
-- **The portal:** build the new commit's image, change `COMMIT`,
-  `systemctl daemon-reload && systemctl restart s3-key-portal`.
-- **The helper and mounter:** install the new binaries, then
-  `systemctl try-restart s3-zfs-mounter s3-zfs-helper`. Both are
-  socket-activated, so a stopped one starts on the next request.
-- **versitygw:** run `TestPermissionsAgainstGateway` (the repository's
-  README) against the new version first. It pins down what keys and web
-  accounts can and can't do.
+In a root shell, in a checkout of the new commit:
+
+1. Build the image and binaries, and install the binaries, as in step 5.
+2. List the installed files that differ from `deploy/files/`:
+
+   ```sh
+   for f in $(cd deploy/files && find etc -type f); do
+       cmp -s "deploy/files/$f" "/$f" || echo "differs: /$f"
+   done
+   ```
+
+   Copy over each changed one except `s3-key-portal.container`, which
+   holds your settings: merge that one by hand. Then set its `COMMIT` to
+   the new commit, and `systemctl daemon-reload`.
+3. Restart what changed:
+
+   ```sh
+   systemctl try-restart s3-zfs-mounter s3-zfs-helper
+   systemctl restart s3-key-portal
+   ```
+
+   The helper and mounter are socket-activated, so a stopped one starts
+   on the next request. `journalctl -u s3-zfs-mounter` warns if its unit
+   lacks a capability it needs.
+4. Remove the old image: `podman image rm localhost/s3-key-portal:<old commit>`.
+
+Before changing versitygw's version in `versitygw.container`, run
+`TestPermissionsAgainstGateway` (the repository's README) against the new
+version. It pins down what keys and web accounts can and can't do.
