@@ -226,9 +226,14 @@ they pick.
 | `PUBLIC_S3_URL` | The S3 endpoint as users should configure it |
 | `TITLE` | Page title (default `S3 access keys`) |
 | `LISTEN` | Listen address (default `:8080`) |
+| `TRUSTED_PROXIES` | Addresses or prefixes, comma-separated, of the TLS proxy in front. Logs take the client's address from `X-Forwarded-For` on requests from them (default: none, so logs show the proxy) |
 | `INSECURE_COOKIES` | Set to drop the cookie `Secure` flag, for testing over plain HTTP |
 
-Run it behind a TLS-terminating proxy. To serve the portal and the S3 API on
+Run it behind a TLS-terminating proxy, which should set
+`X-Forwarded-For`, and put its address in `TRUSTED_PROXIES` so logins are
+logged with the client's address. The header is read only on requests
+from those addresses, from the right, stopping at the first address that
+isn't one of them, so a client can't put words in it. To serve the portal and the S3 API on
 one host name, have the proxy send requests that carry an S3 signature (an
 `Authorization` header starting `AWS`, or `X-Amz-Signature`/`Signature` in the
 query string) to the gateway, and the rest to the portal: browsers never sign

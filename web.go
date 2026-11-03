@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
@@ -40,9 +41,12 @@ type Server struct {
 	Region   string
 	// APIToken, when set, lets automation call /api/ with
 	// "Authorization: Bearer <token>".
-	APIToken   string
-	tmpl       *template.Template
-	failedWait time.Duration
+	APIToken string
+	// TrustedProxies are where the portal's TLS proxy connects from. Logs
+	// take the client's address from X-Forwarded-For on their requests.
+	TrustedProxies []netip.Prefix
+	tmpl           *template.Template
+	failedWait     time.Duration
 	// assetPrefix is /static/<hash of the static files>/, so they can be
 	// cached for good and still change with each release.
 	assetPrefix string
@@ -303,7 +307,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			slog.Error("login", "user", username, "err", err)
 			msg, status = "Couldn't check your password right now. Try again shortly.", http.StatusBadGateway
 		} else {
-			slog.Info("login failed", "user", username, "remote", r.RemoteAddr)
+			slog.Info("login failed", "user", username, "remote", s.clientIP(r))
 		}
 		s.render(w, status, "login.html", page{Error: msg})
 		return
@@ -323,7 +327,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, id Identit
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return false
 	}
-	slog.Info("login", "user", id.Name, "via", source, "remote", r.RemoteAddr)
+	slog.Info("login", "user", id.Name, "via", source, "remote", s.clientIP(r))
 	if source == "ldap" {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}

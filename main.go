@@ -130,6 +130,8 @@ func run() error {
 	if auth == nil && oidcConfig == nil {
 		missing = append(missing, errors.New("set LDAP_URL, OIDC_ISSUER or both"))
 	}
+	trustedProxies, err := ParseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	missing = append(missing, err)
 	sessionKey := secret("SESSION_KEY")
 	statePath := need("STATE_FILE")
 	publicURL := need("PUBLIC_S3_URL")
@@ -209,6 +211,7 @@ func run() error {
 	sessions := &Sessions{Key: []byte(sessionKey), TTL: 12 * time.Hour, Secure: env("INSECURE_COOKIES", "") == "", Store: store}
 	server := NewServer(portal, auth, oidcAuth, sessions, env("TITLE", "S3 access keys"), publicURL, vgw.Region)
 	server.APIToken = apiToken
+	server.TrustedProxies = trustedProxies
 	httpServer := &http.Server{
 		Addr:              env("LISTEN", ":8080"),
 		Handler:           server.Handler(),

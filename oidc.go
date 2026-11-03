@@ -318,12 +318,12 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.As(err, &denied):
 			msg = denied.reason
-			slog.Info("oidc login refused", "user", id.Name, "reason", denied.reason, "remote", r.RemoteAddr)
+			slog.Info("oidc login refused", "user", id.Name, "reason", denied.reason, "remote", s.clientIP(r))
 		case errors.As(err, &ue):
 			msg = ue.Msg
-			slog.Warn("oidc login refused", "user", id.Name, "reason", ue.Msg, "remote", r.RemoteAddr)
+			slog.Warn("oidc login refused", "user", id.Name, "reason", ue.Msg, "remote", s.clientIP(r))
 		default:
-			slog.Error("oidc login", "err", err, "remote", r.RemoteAddr)
+			slog.Error("oidc login", "err", err, "remote", s.clientIP(r))
 		}
 		s.render(w, status, "login.html", page{Error: msg})
 		return

@@ -22,6 +22,9 @@ Environment=VGW_ADMIN_ENDPOINT=http://10.89.40.10:7071
 Environment=STATE_FILE=/state/state.json
 Environment=ZFS_HELPER_SOCKET=/run/s3-zfs-helper/helper.sock
 Environment=PUBLIC_S3_URL=https://s3.example.com
+# s3-tls, in versitygw's network namespace: logins are logged with the
+# client's address from its X-Forwarded-For.
+Environment=TRUSTED_PROXIES=10.89.40.10
 # The directory: see the README's configuration table for the rest, and
 # for OIDC instead of or as well as LDAP.
 Environment=LDAP_URL=ldaps://ldap.example.com:636
