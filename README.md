@@ -1,4 +1,4 @@
-# s3-key-portal
+# versity-s3-portal
 
 A small web app that lets people log in with their LDAP password or an
 OpenID Connect provider, make buckets on a [versitygw](https://github.com/versity/versitygw) gateway,

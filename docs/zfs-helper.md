@@ -1,7 +1,7 @@
 # s3-zfs-helper
 
 `s3-zfs-helper` keeps each of the gateway's buckets in its own ZFS dataset
-for s3-key-portal, so every bucket gets its own quota, backup flag and
+for versity-s3-portal, so every bucket gets its own quota, backup flag and
 snapshots. It runs on the host, beside the gateway, and serves a small JSON
 API on a unix socket that only the portal can reach. It uses the host's own
 `zfs` command.

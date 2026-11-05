@@ -1,4 +1,4 @@
-# Deploying s3-key-portal
+# Deploying versity-s3-portal
 
 This directory describes a complete install on one host: what runs, where
 every file goes, who owns it, and the order to set it up. `files/` holds
@@ -14,7 +14,7 @@ the reference files at the paths they're installed to, so
    ┌─ versitygw's network namespace ─────────────┐
    │  s3-tls (nginx)                              │
    │    signed requests ──▶ versitygw :7070       │   container
-   │    everything else ──▶ s3-key-portal :8080 ──┼─▶ s3-key-portal
+   │    everything else ──▶ versity-s3-portal :8080 ──┼─▶ versity-s3-portal
    │  versitygw :7070 S3, :7071 admin             │   (as nobody)
    └──────────────────────────────────────────────┘        │
             │ /data = /storage/s3/buckets (rslave)          │ /run/s3-zfs-helper/helper.sock
@@ -27,7 +27,7 @@ the reference files at the paths they're installed to, so
    storage/s3/trash/<bucket>-<time>                      mount and look up only)
 ```
 
-- **Containers** (Quadlet, rootful podman): `versitygw`, `s3-key-portal`
+- **Containers** (Quadlet, rootful podman): `versitygw`, `versity-s3-portal`
   and `s3-tls`, on a network `s3` (10.89.40.0/24). Only 80 and 443 are
   published, so nothing off the host reaches the gateway's own ports or
   the portal directly. The host and its other containers can: podman
@@ -54,7 +54,7 @@ The files use these. Change them consistently everywhere they appear.
 | `s3.example.com` | The public name, in `PUBLIC_S3_URL` and the certificate |
 | `COMMIT` | The portal image's tag: the commit it was built from |
 | `S3_ZFS_GID` | The host's `s3-zfs` group id |
-| LDAP settings | In `s3-key-portal.container`; or OIDC instead (README's configuration table) |
+| LDAP settings | In `versity-s3-portal.container`; or OIDC instead (README's configuration table) |
 
 ## What goes where
 
@@ -64,7 +64,7 @@ The files use these. Change them consistently everywhere they appear.
 | --- | --- | --- |
 | `/etc/containers/systemd/s3.network` | root, 0644 | The private network |
 | `/etc/containers/systemd/versitygw.container` | root, 0644 | The gateway |
-| `/etc/containers/systemd/s3-key-portal.container` | root, 0644 | The portal |
+| `/etc/containers/systemd/versity-s3-portal.container` | root, 0644 | The portal |
 | `/etc/containers/systemd/s3-tls.container` | root, 0644 | TLS, in the gateway's network namespace |
 | `/etc/s3-tls/nginx.conf` | root, 0644 | nginx's main config |
 | `/etc/s3-tls/site.conf` | root, 0644 | The routing: signed to the gateway, the rest to the portal, with a sandboxing CSP on everything from the gateway |
@@ -87,7 +87,7 @@ The files use these. Change them consistently everywhere they appear.
 | `/storage/s3/portal` | 65534, 0700 | The portal's state file |
 | `/storage/s3/secrets` | root, 0700 | The secrets below |
 | `/storage/s3/secrets/versitygw.env` | root, 0600 | `ROOT_ACCESS_KEY_ID`, `ROOT_SECRET_ACCESS_KEY` |
-| `/storage/s3/secrets/s3-key-portal.env` | root, 0600 | `VGW_ROOT_ACCESS`, `VGW_ROOT_SECRET` (the same two), `SESSION_KEY`, `API_TOKEN`, and `LDAP_BIND_PASSWORD` or `OIDC_CLIENT_SECRET` |
+| `/storage/s3/secrets/versity-s3-portal.env` | root, 0600 | `VGW_ROOT_ACCESS`, `VGW_ROOT_SECRET` (the same two), `SESSION_KEY`, `API_TOKEN`, and `LDAP_BIND_PASSWORD` or `OIDC_CLIENT_SECRET` |
 | `/storage/s3/secrets/api-token` | root, 0600 | The API token alone, for automation such as a user-management job |
 | `/etc/s3-tls/tls/fullchain.pem` | root, 0644 | The certificate for `s3.example.com`, with its chain |
 | `/etc/s3-tls/tls/privkey.pem` | root, 0600 | Its key |
@@ -176,13 +176,13 @@ Run as root, in this order.
    [ -e api-token ] || head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9 > api-token
    [ -e versitygw.env ] || printf 'ROOT_ACCESS_KEY_ID=%s\nROOT_SECRET_ACCESS_KEY=%s\n' \
        "$(cat root-access)" "$(cat root-secret)" > versitygw.env
-   [ -e s3-key-portal.env ] || printf 'VGW_ROOT_ACCESS=%s\nVGW_ROOT_SECRET=%s\nSESSION_KEY=%s\nAPI_TOKEN=%s\n' \
-       "$(cat root-access)" "$(cat root-secret)" "$(cat session-key)" "$(cat api-token)" > s3-key-portal.env
+   [ -e versity-s3-portal.env ] || printf 'VGW_ROOT_ACCESS=%s\nVGW_ROOT_SECRET=%s\nSESSION_KEY=%s\nAPI_TOKEN=%s\n' \
+       "$(cat root-access)" "$(cat root-secret)" "$(cat session-key)" "$(cat api-token)" > versity-s3-portal.env
    )
    ```
 
    Then add `LDAP_BIND_PASSWORD=<the search account's password>` (or
-   `OIDC_CLIENT_SECRET=…`) to `s3-key-portal.env` with an editor, and put
+   `OIDC_CLIENT_SECRET=…`) to `versity-s3-portal.env` with an editor, and put
    the certificate and key in `/etc/s3-tls/tls/`.
 
 5. **Binaries and images.** In a checkout of this repository at the
@@ -192,7 +192,7 @@ Run as root, in this order.
 
    ```sh
    COMMIT=$(sudo -u "$(stat -c %U .)" git rev-parse HEAD)
-   podman build -t localhost/s3-key-portal:$COMMIT .
+   podman build -t localhost/versity-s3-portal:$COMMIT .
    out=$(mktemp -d)
    podman build --target zfs-helper --output type=local,dest=$out .
    install -o root -g root -m 0755 $out/s3-zfs-helper $out/s3-zfs-mounter /usr/local/sbin/
@@ -204,7 +204,7 @@ Run as root, in this order.
 
 6. **Files.** Still in the checkout, copy `deploy/files/` into place,
    then set `COMMIT`, `S3_ZFS_GID`, the host name and the directory
-   settings in `/etc/containers/systemd/s3-key-portal.container`.
+   settings in `/etc/containers/systemd/versity-s3-portal.container`.
 
    ```sh
    cp -r deploy/files/etc/. /etc/
@@ -218,7 +218,7 @@ Run as root, in this order.
    ```sh
    systemctl enable --now s3-zfs-mounter.socket
    systemctl enable --now s3-zfs-helper.socket
-   systemctl start versitygw s3-tls s3-key-portal
+   systemctl start versitygw s3-tls versity-s3-portal
    ```
 
    Quadlet services are enabled through their `[Install]` sections; they
@@ -252,7 +252,7 @@ only the containers and the TLS config:
 cp -r deploy/files/etc/containers deploy/files/etc/s3-tls /etc/
 ```
 
-and from `s3-key-portal.container` remove `ZFS_HELPER_SOCKET`, the
+and from `versity-s3-portal.container` remove `ZFS_HELPER_SOCKET`, the
 `--group-add` line, the `/run/s3-zfs-helper` volume, and
 `s3-zfs-helper.socket` from `Wants=` and `After=`. In step 7, start only
 the containers.
@@ -270,20 +270,20 @@ In a root shell, in a checkout of the new commit:
    done
    ```
 
-   Copy over each changed one except `s3-key-portal.container`, which
+   Copy over each changed one except `versity-s3-portal.container`, which
    holds your settings: merge that one by hand. Then set its `COMMIT` to
    the new commit, and `systemctl daemon-reload`.
 3. Restart what changed:
 
    ```sh
    systemctl try-restart s3-zfs-mounter s3-zfs-helper
-   systemctl restart s3-key-portal
+   systemctl restart versity-s3-portal
    ```
 
    The helper and mounter are socket-activated, so a stopped one starts
    on the next request. `journalctl -u s3-zfs-mounter` warns if its unit
    lacks a capability it needs.
-4. Remove the old image: `podman image rm localhost/s3-key-portal:<old commit>`.
+4. Remove the old image: `podman image rm localhost/versity-s3-portal:<old commit>`.
 
 Before changing versitygw's version in `versitygw.container`, run
 `TestPermissionsAgainstGateway` (the repository's README) against the new

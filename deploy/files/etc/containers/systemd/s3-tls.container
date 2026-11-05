@@ -2,7 +2,7 @@
 # (site.conf). It lives in versitygw's network namespace, so it serves the
 # ports versitygw.container publishes, and restarts with it.
 [Unit]
-Description=s3-tls: TLS for versitygw and s3-key-portal
+Description=s3-tls: TLS for versitygw and versity-s3-portal
 BindsTo=versitygw.service
 After=versitygw.service
 PartOf=versitygw.service

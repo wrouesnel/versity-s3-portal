@@ -1,5 +1,5 @@
 // s3-zfs-helper keeps each of the S3 gateway's buckets in its own ZFS
-// dataset, for s3-key-portal: it adopts new buckets as datasets, sets
+// dataset, for versity-s3-portal: it adopts new buckets as datasets, sets
 // quotas and the backup flag, and takes, lists, browses and restores from
 // snapshots. It runs on the host as its own unprivileged user, with ZFS
 // permissions delegated over the buckets and the trash, and asks

@@ -1,4 +1,4 @@
-// s3-key-portal lets people log in with their LDAP password and issue
+// versity-s3-portal lets people log in with their LDAP password and issue
 // versitygw access keys limited to buckets they own.
 package main
 
