@@ -306,3 +306,8 @@ podman run -d --name vgw -p 7070:7070 -p 7071:7071 \
 VGW_TEST_S3=http://127.0.0.1:7070 VGW_TEST_ADMIN=http://127.0.0.1:7071 \
 VGW_TEST_ACCESS=rootkey VGW_TEST_SECRET=rootsecret12345678 go test ./...
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE). The vendored dependencies in `vendor/` keep
+their own licenses.
