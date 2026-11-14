@@ -52,11 +52,12 @@
     </div>
     {{if .Buckets}}
     <table class="files bucket-table">
-      <thead><tr><th>Bucket</th><th>Owner</th><th>Your access</th><th>Shared through</th></tr></thead>
+      <thead><tr><th data-sort="text" aria-sort="ascending">Bucket</th>{{if .Sizes}}<th class="num" data-sort="num" title="The bucket's files now; snapshots aside">Size</th>{{end}}<th data-sort="text">Owner</th><th data-sort="text">Your access</th><th data-sort="text">Shared through</th></tr></thead>
       <tbody>
       {{range .Buckets}}
       <tr data-bucket="{{.Name}}">
         <td><a class="bucket" href="{{browseURL .Name ""}}">{{.Name}}</a></td>
+        {{if $.Sizes}}{{with size $.Sizes .Name}}<td class="num" data-v="{{.Referenced}}"{{if .RefQuota}} title="{{pct .Referenced .RefQuota}}% of its {{humanSize .RefQuota}} quota"{{end}}>{{if .Bucket}}{{humanSize .Referenced}}{{else}}<span class="muted">—</span>{{end}}</td>{{end}}{{end}}
         <td>{{if eq .Owner $me}}you{{else if .Owner}}{{.Owner}}{{else}}<span class="muted">nobody</span>{{end}}</td>
         <td>{{template "level" .Caps}}</td>
         <td class="muted">{{join .Via ", "}}</td>
@@ -325,6 +326,7 @@
         </div>
       </div>
       <p class="access-note muted small">
+        {{with size .Sizes .Open.Name}}{{if .Bucket}}<span class="bucket-size" title="{{if .RefQuota}}{{pct .Referenced .RefQuota}}% of the quota. {{end}}Snapshots hold another {{humanSize (sub .Used .Referenced)}}."><strong>{{humanSize .Referenced}}</strong>{{if .RefQuota}} of {{humanSize .RefQuota}}<meter class="quota" min="0" max="100" low="75" high="90" optimum="0" value="{{pct .Referenced .RefQuota}}" aria-label="Quota used"></meter>{{end}}</span><span class="dot">·</span>{{end}}{{end}}
         {{if eq .Open.Owner .User.Name}}Your bucket.{{else}}{{if .Open.Owner}}{{.Open.Owner}}'s bucket{{else}}Bucket{{end}}{{if .Open.Via}}, shared with {{join .Open.Via ", "}}{{end}}.{{end}}
         You can: {{template "level" $caps}}{{if and $caps.Create (not $caps.Put)}} — new files only; existing names are refused{{end}}
       </p>

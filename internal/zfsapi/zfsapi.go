@@ -81,6 +81,17 @@ type BucketInfo struct {
 	Backup          bool  `json:"backup"`
 }
 
+// BucketSize is one bucket in GET /buckets: how much it holds, for
+// showing beside its name.
+type BucketSize struct {
+	Bucket string `json:"bucket"`
+	// Referenced is the live data, which a quota limits.
+	Referenced int64 `json:"referenced"`
+	// Used adds the snapshots' share.
+	Used     int64 `json:"used"`
+	RefQuota int64 `json:"refquota"`
+}
+
 // Quota is PUT /buckets/{b}/quota. 0 removes the quota.
 type Quota struct {
 	Bytes int64 `json:"bytes"`

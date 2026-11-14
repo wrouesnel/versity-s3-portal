@@ -254,6 +254,7 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
+	h("GET /buckets", true, s.listBuckets)
 	h("POST /buckets/{b}/adopt", false, s.adopt)
 	h("GET /buckets/{b}", true, s.getBucket)
 	h("DELETE /buckets/{b}", false, s.destroy)
@@ -453,6 +454,30 @@ func (s *Server) snapRoot(r *http.Request, b *bucket) (int, error) {
 func internal(name string) bool { return name == ".sgwtmp" || name == ".zfs" }
 
 // ---------------------------------------------------------------- buckets
+
+// listBuckets reports every bucket dataset's size in one zfs call, so a
+// page listing hundreds of buckets can show them.
+func (s *Server) listBuckets(w http.ResponseWriter, r *http.Request) error {
+	out, err := s.run(r.Context(), "list", "-H", "-p", "-d", "1", "-t", "filesystem", "-o", "name,used,referenced,refquota", s.Parent)
+	if err != nil {
+		return err
+	}
+	sizes := []zfsapi.BucketSize{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 4 {
+			continue
+		}
+		name, ok := strings.CutPrefix(f[0], s.Parent+"/")
+		if !ok || strings.Contains(name, "/") {
+			continue
+		}
+		num := func(v string) int64 { n, _ := strconv.ParseInt(v, 10, 64); return n }
+		sizes = append(sizes, zfsapi.BucketSize{Bucket: name, Used: num(f[1]), Referenced: num(f[2]), RefQuota: num(f[3])})
+	}
+	writeJSON(w, http.StatusOK, sizes)
+	return nil
+}
 
 func (s *Server) getBucket(w http.ResponseWriter, r *http.Request) error {
 	b, err := s.dataset(r)

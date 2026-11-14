@@ -279,3 +279,13 @@ a.menu-item { text-decoration: none !important; }
 .menu-item.danger { color: var(--danger); }
 button.menu-item:hover, a.menu-item:hover { background: var(--hover); }
 td.actions .menu-list form { display: contents; }
+
+/* Sizes */
+.bucket-size { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+.bucket-size strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+meter.quota { width: 80px; height: 6px; }
+.access-note .dot { color: var(--muted); }
+th[data-sort] { cursor: pointer; user-select: none; }
+th[data-sort]:hover { color: var(--text); }
+th[aria-sort=ascending]::after { content: " ▲"; font-size: .65em; }
+th[aria-sort=descending]::after { content: " ▼"; font-size: .65em; }

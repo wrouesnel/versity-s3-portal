@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wrouesnel/versity-s3-portal/internal/zfsapi"
 )
 
 //go:embed templates/*.html
@@ -71,6 +73,17 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 		"snapURL":    snapURL,
 		"snapKind":   snapshotKind,
 		"inc":        func(i int) int { return i + 1 },
+		// size is a bucket's entry in Sizes, and whether there is one.
+		"size": func(sizes map[string]zfsapi.BucketSize, bucket string) (zfsapi.BucketSize, error) {
+			return sizes[bucket], nil
+		},
+		"sub": func(a, b int64) int64 { return max(0, a-b) },
+		"pct": func(n, of int64) int64 {
+			if of <= 0 {
+				return 0
+			}
+			return min(100, n*100/of)
+		},
 		// selbar and rowsel give the selection templates what they need
 		// from the page.
 		"selbar": func(p page, canDelete bool) selView {
@@ -221,8 +234,10 @@ type page struct {
 	GroupList []string
 	Grantees  map[string]Perm
 	// ZFS: the open bucket's dataset, and the snapshot being browsed.
-	ZFS       bool
-	Storage   *Storage
+	ZFS     bool
+	Storage *Storage
+	// Sizes are the buckets' sizes from ZFS, when known.
+	Sizes     map[string]zfsapi.BucketSize
 	Snapshots bool
 	Snap      string
 	// The admin page.
@@ -402,6 +417,7 @@ func (s *Server) sidebar(r *http.Request, sess *Session, p *page, open string) e
 		return err
 	}
 	p.Buckets = buckets
+	p.Sizes = s.Portal.BucketSizes(r.Context())
 	if open != "" {
 		v, err := s.Portal.Bucket(r.Context(), sess.User, open, false)
 		if err != nil {

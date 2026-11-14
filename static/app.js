@@ -295,6 +295,30 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+// Clicking a header with data-sort sorts its table by that column; again
+// reverses it. Cells may carry data-v to sort by instead of their text.
+document.addEventListener("click", (ev) => {
+  const th = ev.target.closest && ev.target.closest("th[data-sort]");
+  if (!th) return;
+  const table = th.closest("table");
+  const col = [...th.parentElement.children].indexOf(th);
+  const dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1;
+  for (const h of th.parentElement.children) h.removeAttribute("aria-sort");
+  th.setAttribute("aria-sort", dir === 1 ? "ascending" : "descending");
+  const num = th.dataset.sort === "num";
+  const key = (tr) => {
+    const td = tr.children[col];
+    const v = td.dataset.v ?? td.textContent.trim();
+    return num ? Number(v) || 0 : v.toLowerCase();
+  };
+  const body = table.tBodies[0];
+  const rows = [...body.rows].sort((a, b) => {
+    const x = key(a), y = key(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * dir;
+  });
+  body.append(...rows);
+});
+
 // placeCurrentBucket scrolls the sidebar to the open bucket on a fresh load.
 function placeCurrentBucket() {
   const side = document.querySelector(".sidebar");

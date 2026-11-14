@@ -169,6 +169,19 @@ func (z *ZFSHelper) Destroy(ctx context.Context, bucket string) error {
 	return z.call(ctx, http.MethodDelete, zfsPath(bucket), nil, nil, nil)
 }
 
+// Sizes returns every bucket dataset's size, by bucket name.
+func (z *ZFSHelper) Sizes(ctx context.Context) (map[string]zfsapi.BucketSize, error) {
+	var list []zfsapi.BucketSize
+	if err := z.call(ctx, http.MethodGet, "/buckets", nil, nil, &list); err != nil {
+		return nil, err
+	}
+	out := make(map[string]zfsapi.BucketSize, len(list))
+	for _, b := range list {
+		out[b.Bucket] = b
+	}
+	return out, nil
+}
+
 // Trash lists deleted buckets in the trash, most recently deleted first.
 func (z *ZFSHelper) Trash(ctx context.Context) ([]ZFSTrashEntry, error) {
 	var out []ZFSTrashEntry

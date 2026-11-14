@@ -589,7 +589,12 @@ func (f *Fake) list(args []string) ([]byte, error) {
 		if f.ds[n].at != "" {
 			mounted = "yes"
 		}
-		row(map[string]string{"name": n, "mountpoint": f.mountpoint(n), "mounted": mounted, "used": fmt.Sprint(duBytes(f.data(n)))})
+		du := fmt.Sprint(duBytes(f.data(n)))
+		quota := f.ds[n].props["refquota"]
+		if quota == "" || quota == "none" {
+			quota = "0"
+		}
+		row(map[string]string{"name": n, "mountpoint": f.mountpoint(n), "mounted": mounted, "used": du, "referenced": du, "refquota": quota})
 	}
 	return []byte(b.String()), nil
 }

@@ -585,6 +585,28 @@ func TestQuotaAndBackup(t *testing.T) {
 	e.want(404, "GET", "/buckets/nothere", nil)
 }
 
+func TestListBuckets(t *testing.T) {
+	e := newEnv(t)
+	var sizes []zfsapi.BucketSize
+	json.Unmarshal(e.want(200, "GET", "/buckets", nil), &sizes)
+	if len(sizes) != 0 {
+		t.Fatalf("no buckets yet, got %+v", sizes)
+	}
+	for _, b := range []string{"photos", "docs"} {
+		e.mkBucket(b)
+		e.want(201, "POST", "/buckets/"+b+"/adopt", nil)
+	}
+	e.want(204, "PUT", "/buckets/photos/quota", zfsapi.Quota{Bytes: 10 << 30})
+	json.Unmarshal(e.want(200, "GET", "/buckets", nil), &sizes)
+	got := map[string]zfsapi.BucketSize{}
+	for _, s := range sizes {
+		got[s.Bucket] = s
+	}
+	if len(got) != 2 || got["photos"].RefQuota != 10<<30 || got["docs"].RefQuota != 0 {
+		t.Errorf("sizes %+v", sizes)
+	}
+}
+
 func TestSnapshots(t *testing.T) {
 	e := newEnv(t)
 	e.mkBucket("photos")

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wrouesnel/versity-s3-portal/internal/zfsapi"
 )
 
 // ZFSDefaults are applied to each new bucket's dataset.
@@ -256,6 +258,21 @@ func (p *Portal) snapshotReader(ctx context.Context, u User, bucket string) erro
 		return userErr("You can't see what's in %s, so you can't see its snapshots either.", bucket)
 	}
 	return nil
+}
+
+// BucketSizes is every bucket's size from ZFS, or nil without ZFS or if
+// the helper can't say: sizes are shown when known, and their absence
+// shouldn't stop anyone browsing.
+func (p *Portal) BucketSizes(ctx context.Context) map[string]zfsapi.BucketSize {
+	if p.zfs == nil {
+		return nil
+	}
+	sizes, err := p.zfs.Sizes(ctx)
+	if err != nil {
+		slog.Warn("couldn't get bucket sizes", "err", err)
+		return nil
+	}
+	return sizes
 }
 
 // ListSnapshot lists a folder of a bucket as it was in a snapshot.
