@@ -70,6 +70,7 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 		"browseURL":  browseURL,
 		"snapURL":    snapURL,
 		"snapKind":   snapshotKind,
+		"inc":        func(i int) int { return i + 1 },
 	}).ParseFS(templateFS, "templates/*.html"))
 	return &Server{
 		Portal: portal, Auth: auth, OIDC: oidcAuth, Sessions: sessions,

@@ -1,52 +1,72 @@
 {{template "header" .}}
 <div class="split">
-  <aside class="sidebar card" aria-label="Buckets">
-    <form method="post" action="/buckets" class="new-bucket">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <input name="name" placeholder="new-bucket-name" aria-label="New bucket name" pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" title="3 to 63 lowercase letters, digits and hyphens" autocapitalize="none" spellcheck="false" required>
-      <button class="small" aria-label="Create bucket">Create</button>
-    </form>
-    {{$open := ""}}{{if .Open}}{{$open = .Open.Name}}{{end}}
-    {{$me := .User.Name}}
-    {{$mine := 0}}{{$shared := 0}}
-    {{range .Buckets}}{{if eq .Owner $me}}{{$mine = 1}}{{else}}{{$shared = 1}}{{end}}{{end}}
+  {{$open := ""}}{{if .Open}}{{$open = .Open.Name}}{{end}}
+  {{$me := .User.Name}}
+  {{$mine := 0}}{{$shared := 0}}
+  {{range .Buckets}}{{if eq .Owner $me}}{{$mine = inc $mine}}{{else}}{{$shared = inc $shared}}{{end}}{{end}}
+  <aside class="sidebar" id="sidebar" aria-label="Buckets">
+    <div class="side-tools">
+      <input type="search" id="bucket-filter" placeholder="Filter {{len .Buckets}} buckets" aria-label="Filter buckets" autocomplete="off" spellcheck="false" title="Filter buckets (press / to jump here)">
+      <details class="menu">
+        <summary class="button small" title="Create a bucket">New</summary>
+        <form method="post" action="/buckets" class="row compact pop">
+          <input type="hidden" name="csrf" value="{{.CSRF}}">
+          <input name="name" placeholder="new-bucket-name" aria-label="New bucket name" pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" title="3 to 63 lowercase letters, digits and hyphens" autocapitalize="none" spellcheck="false" required>
+          <button>Create bucket</button>
+        </form>
+      </details>
+    </div>
     <nav class="bucket-nav">
-      <h2>Your buckets</h2>
+      <h2>Yours <span class="count">{{$mine}}</span></h2>
       {{if $mine}}
       <ul>
         {{range .Buckets}}{{if eq .Owner $me}}
-        <li><a class="bucket" href="{{browseURL .Name ""}}"{{if eq .Name $open}} aria-current="page"{{end}}>{{.Name}}</a></li>
+        <li data-name="{{.Name}}"><a class="bucket" href="{{browseURL .Name ""}}"{{if eq .Name $open}} aria-current="page"{{end}}>{{.Name}}</a></li>
         {{end}}{{end}}
       </ul>
-      {{else}}<p class="muted small">None yet. Name one above to make it.</p>{{end}}
+      {{else}}<p class="muted small side-note">None yet. Use New to make one.</p>{{end}}
       {{if $shared}}
-      <h2>Shared with you</h2>
+      <h2>Shared with you <span class="count">{{$shared}}</span></h2>
       <ul>
         {{range .Buckets}}{{if ne .Owner $me}}
-        <li><a class="bucket shared" href="{{browseURL .Name ""}}"{{if eq .Name $open}} aria-current="page"{{end}} title="{{.Level}} via {{join .Via ", "}}">{{.Name}}<span class="via">{{.Level}}</span></a></li>
+        <li data-name="{{.Name}}"><a class="bucket shared" href="{{browseURL .Name ""}}"{{if eq .Name $open}} aria-current="page"{{end}} title="{{.Owner}}'s, {{.Level}} via {{join .Via ", "}}">{{.Name}}<span class="via">{{.Level}}</span></a></li>
         {{end}}{{end}}
       </ul>
       {{end}}
+      <p class="muted small side-note no-match" hidden>No buckets match.</p>
     </nav>
   </aside>
+  <div class="side-resize" role="separator" aria-orientation="vertical" aria-controls="sidebar" aria-label="Resize the bucket list" tabindex="0" title="Drag to resize; double-click to reset"></div>
+  <div class="side-backdrop" aria-hidden="true"></div>
 
-  <section class="pane card" id="pane">
+  <section class="pane" id="pane">
     <div id="flash">
     {{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
     {{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
     </div>
 
     {{if not .Open}}
-    <div class="empty-pane">
-      <h1>Files</h1>
-      <p class="muted">Pick a bucket on the left to browse, upload and download its files.</p>
-      <dl class="connect">
-        <dt>S3 endpoint</dt><dd><code class="copy">{{.S3URL}}</code></dd>
-        <dt>Region</dt><dd><code>{{.Region}}</code></dd>
-        <dt>Addressing</dt><dd>Path style</dd>
-      </dl>
-      <p><a class="button ghost" href="/keys">Manage access keys</a></p>
+    <div class="pane-head">
+      <h1>All buckets</h1>
+      <p class="connect-line muted small">S3 endpoint <code class="copy">{{.S3URL}}</code> region <code>{{.Region}}</code>, path style · <a href="/keys">Access keys</a></p>
     </div>
+    {{if .Buckets}}
+    <table class="files bucket-table">
+      <thead><tr><th>Bucket</th><th>Owner</th><th>Your access</th><th>Shared through</th></tr></thead>
+      <tbody>
+      {{range .Buckets}}
+      <tr data-bucket="{{.Name}}">
+        <td><a class="bucket" href="{{browseURL .Name ""}}">{{.Name}}</a></td>
+        <td>{{if eq .Owner $me}}you{{else if .Owner}}{{.Owner}}{{else}}<span class="muted">nobody</span>{{end}}</td>
+        <td>{{template "level" .Caps}}</td>
+        <td class="muted">{{join .Via ", "}}</td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No buckets yet. Use New, top left, to make one.</p>
+    {{end}}
 
     {{else if .Settings}}
     <div class="pane-head">
@@ -268,8 +288,16 @@
         </nav>
         <div class="row compact toolbar">
           {{if or $caps.Put $caps.Create}}
-          <label class="button" tabindex="0">Upload<input type="file" class="pick" multiple hidden></label>
-          <label class="button ghost" tabindex="0">Upload folder<input type="file" class="pick" webkitdirectory hidden></label>
+          <div class="split-button">
+            <label class="button" tabindex="0" title="Upload files into this folder">Upload<input type="file" class="pick" multiple hidden></label>
+            <details class="menu">
+              <summary class="button caret" aria-label="More ways to upload" title="More ways to upload"></summary>
+              <div class="pop menu-list" role="menu">
+                <label class="menu-item" tabindex="0" role="menuitem">Upload folder…<input type="file" class="pick" webkitdirectory hidden></label>
+                <label class="menu-item" tabindex="0" role="menuitem" title="Unpack a .zip, .tar or .tar.gz here, keeping its folders">Extract archive…<input type="file" class="pick-archive" accept=".zip,.tar,.tgz,.gz" hidden></label>
+              </div>
+            </details>
+          </div>
           <details class="menu">
             <summary class="button ghost">New folder</summary>
             <form method="post" action="/folders" class="row compact pop">

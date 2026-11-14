@@ -7,12 +7,14 @@
 <title>{{.Title}}</title>
 <link rel="icon" href="{{asset "bucket.svg"}}" type="image/svg+xml">
 <link rel="stylesheet" href="{{asset "style.css"}}">
+<script src="{{asset "early.js"}}"></script>
 <script src="{{asset "app.js"}}" defer></script>
 </head>
 <body>
 <header class="top">
   <div class="top-inner">
-    <a class="brand" href="/"><span class="logo" aria-hidden="true"></span>{{.Title}}</a>
+    {{if eq .Tab "files"}}<button type="button" class="hamburger" aria-controls="sidebar" aria-expanded="true" aria-label="Show or hide the bucket list" title="Bucket list"><span></span></button>{{end}}
+    <a class="brand" href="/">{{.Title}}</a>
     {{if .User}}
     <nav class="links" aria-label="Main">
       <a href="/files"{{if eq .Tab "files"}} aria-current="page"{{end}}>Files</a>
@@ -21,7 +23,6 @@
     </nav>
     <form method="post" action="/logout" class="who">
       <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <span class="avatar" aria-hidden="true">{{slice .User.Name 0 1}}</span>
       <span class="name">{{.User.Name}}</span>
       <button class="ghost small">Log out</button>
     </form>
