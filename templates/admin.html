@@ -398,7 +398,7 @@
 <form method="post" action="/admin/mirror/accept" class="row">
   <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$m.Bucket}}">
   <input name="note" required placeholder="Why it's all right to leave these behind" aria-label="Why it's all right to leave these behind">
-  <button class="ghost">Accept leaving these {{.Summary.Uncopyable}} behind</button>
+  <button class="ghost">{{if eq .Summary.Uncopyable 1}}Accept leaving it behind{{else}}Accept leaving these {{.Summary.Uncopyable}} behind{{end}}</button>
 </form>
 <p class="small muted">Until these are fixed at the source or accepted, the mirror can't count as synced or verified. Acceptance holds while the list stays the same.</p>
 {{end}}{{end}}

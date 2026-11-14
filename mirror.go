@@ -574,7 +574,7 @@ func (p *Portal) AcceptUncopyable(admin User, bucket, note string) error {
 		}
 		m.Accepted = &UncopyableAcceptance{By: admin.Name, At: time.Now(), Note: note, Sum: last.UncopyableSum, Count: last.Uncopyable, Pass: last.N}
 		m.History = append(m.History, MirrorEvent{At: time.Now(), State: m.State, By: admin.Name,
-			Note: fmt.Sprintf("Accepted leaving %d keys that can't be copied behind: %s", last.Uncopyable, note)})
+			Note: fmt.Sprintf("Accepted leaving %s that can't be copied behind: %s", plural(last.Uncopyable, "key"), note)})
 		if m.State == MirrorSyncing && last.Clean(m.Accepted) {
 			m.setState(MirrorSynced, "portal", "")
 		}
@@ -1021,4 +1021,12 @@ func (p *Portal) MirrorReport(admin User, bucket string, n int) ([]byte, error) 
 		return nil, userErr("That pass's report is gone.")
 	}
 	return data, err
+}
+
+// plural is n and the noun, with an s unless n is 1.
+func plural(n int64, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }

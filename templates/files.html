@@ -394,7 +394,9 @@
       </p>
       <ul id="upload-status" class="uploads" aria-live="polite"></ul>
 
-      {{if not $caps.Read}}
+      {{if $caps.None}}
+      <p class="empty">You can manage this bucket's settings, but not see or change its files.{{if .Open.Owner}} {{.Open.Owner}} can give a group you're in access.{{end}}</p>
+      {{else if not $caps.Read}}
       <p class="empty">This bucket is a drop box for you: upload files here, but you can't see what's in it.</p>
       {{else if .Listing}}
       {{if or .Listing.Prefixes .Listing.Objects}}
