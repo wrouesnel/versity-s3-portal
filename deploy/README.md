@@ -67,7 +67,7 @@ The files use these. Change them consistently everywhere they appear.
 | `/etc/containers/systemd/versity-s3-portal.container` | root, 0644 | The portal |
 | `/etc/containers/systemd/s3-tls.container` | root, 0644 | TLS, in the gateway's network namespace |
 | `/etc/s3-tls/nginx.conf` | root, 0644 | nginx's main config |
-| `/etc/s3-tls/site.conf` | root, 0644 | The routing: signed to the gateway, the rest to the portal, with a sandboxing CSP on everything from the gateway |
+| `/etc/s3-tls/site.conf` | root, 0644 | The routing: signed to the gateway, the rest to the portal, with a sandboxing CSP on everything from the gateway. It also answers a signed CreateBucket itself with BucketAlreadyOwnedByYou, so rclone works without `no_check_bucket` |
 | `/etc/systemd/system/s3-zfs-mounter.socket` | root, 0644 | The mounter's socket, root:s3zfs 0660 |
 | `/etc/systemd/system/s3-zfs-mounter.service` | root, 0644 | The mounter |
 | `/etc/systemd/system/s3-zfs-helper.socket` | root, 0644 | The helper's socket, root:s3-zfs 0660 |

@@ -19,7 +19,7 @@ endpoint = {{.S3URL}}
 region = {{.Region}}
 force_path_style = true
 no_check_bucket = true</pre>
-  <p class="muted">Keys can't create buckets, so tools that try to need telling not to. rclone tries by default, which is what the <code>no_check_bucket</code> line is for.</p>
+  <p class="muted">Buckets are made here in the portal, not by keys. rclone works without the <code>no_check_bucket</code> line, but it saves rclone a request: without it, rclone tries to create the bucket first.</p>
   {{range $b, $p := .Grants}}{{if eq $p "createonly"}}<p class="flash warning">This key can only <strong>add</strong> files to {{$b}}: every upload must send <code>If-None-Match: *</code> and be a single PUT (no multipart). With the AWS CLI that's <code>aws s3api put-object --if-none-match '*'</code>.</p>{{end}}{{end}}
   <h2>AWS CLI</h2>
   <pre class="copy">AWS_ACCESS_KEY_ID={{.KeyAccess}} AWS_SECRET_ACCESS_KEY={{.KeySecret}} \

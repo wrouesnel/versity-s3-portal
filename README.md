@@ -86,7 +86,10 @@ they pick.
   - A `user` account can't create buckets. It reaches buckets only through
     bucket policies, which the portal writes in full from its records
     whenever anything they depend on changes. Only policies that actually
-    changed are sent.
+    changed are sent. Tools that create the bucket before uploading, as
+    rclone does, would fail with AccessDenied, so the TLS proxy in
+    `deploy/` answers a signed CreateBucket with BucketAlreadyOwnedByYou
+    instead of passing it on.
   - A key asks for a level on each bucket, no more than its owner has when
     it's made. What it gets is that level limited by what its owner has
     *now*. When someone leaves a group, is disabled, or a grant is taken
