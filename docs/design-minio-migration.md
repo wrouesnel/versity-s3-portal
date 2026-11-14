@@ -1,6 +1,8 @@
 # Design: moving from MinIO
 
-Status: proposal, not built. For a small number of users and buckets,
+Status: proposal, not built. The copying in the steps below is now
+designed as a portal feature, with the steps and checks shown in the
+admin page: see `design-bucket-mirror.md`. For a small number of users and buckets,
 the **one-off migration** below is the recommended path. **Pull-through
 mirroring** is written up for the record, in case a migration ever has to
 happen with no downtime at all.
