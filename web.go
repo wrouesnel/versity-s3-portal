@@ -18,6 +18,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +79,17 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 			return sizes[bucket], nil
 		},
 		"sub": func(a, b int64) int64 { return max(0, a-b) },
+		// at lists, sorted, the buckets a key has at one level.
+		"at": func(grants map[string]Perm, perm Perm) string {
+			var out []string
+			for b, p := range grants {
+				if p == perm {
+					out = append(out, b)
+				}
+			}
+			sort.Strings(out)
+			return strings.Join(out, ", ")
+		},
 		"pct": func(n, of int64) int64 {
 			if of <= 0 {
 				return 0

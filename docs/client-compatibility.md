@@ -16,73 +16,65 @@ All three clients handle these:
 
 Every access level allows and refuses exactly what `policy.go` says.
 
-## To fix
+## Fixed
 
-1. **Refused uploads over about 256 KB come back as a 502, and clients
-   retry them.**
-   - This affects read-only and wrong-bucket keys, and add-only
-     "already exists" errors.
-   - The cause: versitygw answers 403 or 412 before reading the request
-     body, then closes the connection with the body unread. nginx gets a
-     reset while still sending, and loses the response.
-   - What clients do:
-     - aws: retries, then shows `(502) … Bad Gateway`.
-     - rclone: `expected element type <Error> but have <html>`.
-     - mc: sometimes prints nginx's HTML.
-   - Proxy fix: `error_page 502 = @s3_refused`, mapped on
-     `$request_method $upstream_bytes_sent`, so a PUT whose body was
-     partly sent gets an S3 XML 403 and anything else an XML 503. The
-     catch: add-only "already exists" over ~256 KB then shows as 403,
-     not 412.
-   - Upstream fix: versitygw should drain the body, up to a limit, or
-     close gracefully on early errors.
-2. **Listing buckets shows nothing.**
-   - `aws s3 ls`, `rclone lsd s3:` and `mc ls alias` all come back empty,
-     because versitygw's ListBuckets only shows buckets a `user` account
-     owns, not ones granted by policy.
-   - The portal can't fix this. The key page should say to name the
-     bucket. Worth raising with versitygw upstream too.
-3. **The CreateBucket shim answers 409 even for buckets that don't
-   exist.**
-   - So `rclone mkdir s3:newname` appears to succeed, and the next copy
-     fails with NoSuchBucket. `aws s3 mb` and `mc mb` print a misleading
-     message.
-   - Fix: send the signed CreateBucket to an internal location that makes
-     an anonymous `HEAD /<bucket>` to the gateway.
-     - 403 means the bucket exists: answer 409 BucketAlreadyOwnedByYou.
-     - 404 means it doesn't: answer 403 "keys can't create buckets: make
-       it in the portal".
-   - This reveals nothing new, because anonymous HEAD already shows
-     whether a bucket exists.
-4. **Presigned POST (`mc share upload`) goes to the portal.**
-   - Its signature is in the form body, which the routing map can't see.
-     The portal answers 200 with HTML, and nothing is uploaded.
-   - Fix: add `$request_method $content_type` to the `$s3_upstream` map,
-     and send `POST multipart/form-data` to the gateway. The portal never
-     takes multipart forms.
-5. **The proxy hard-codes the gateway port.** The regexes `~:7070$` and
-   `\S+:7070  ` both depend on it, so comment them.
-6. **Key page and docs.** Add an mc snippet:
-   `mc alias set s3 URL ACCESS SECRET --api S3v4 --path on`. Then
-   document the following.
-   - **Listing:** name the bucket; listing all buckets shows nothing.
-   - **Write-only keys:**
-     - rclone: set `no_head = true` and use `copy --no-check-dest` (or
-       `--no-traverse`). Never use `sync`, or `copy` without those flags:
-       it uploads, reports Forbidden, and uploads again three times.
-     - aws: `s3 cp` works, `s3 sync` doesn't.
-     - mc: `cp` works, `mirror` doesn't.
-   - **Add-only keys:**
-     - aws: `s3 cp --no-overwrite` works. Set
-       `s3.multipart_threshold = 5GB` for files over 8 MB. `s3 sync`
-       doesn't work.
-     - mc: `cp -H "If-None-Match:*" --disable-multipart` works.
-     - rclone 1.60 can't send `If-None-Match`, so it can't use add-only
-       keys at all.
-   - **mc mirror bug:** never use `mc mirror` with read-only or add-only
-     keys. It reports success when every upload is refused.
-   - **mc errors:** `mc admin` doesn't apply, and fails with a confusing
-     region message.
+These were found in that testing, and are fixed in `deploy/`'s proxy
+config and the key page. Each fix was checked with the client that showed
+the problem.
+
+1. **Refused uploads over about 256 KB came back as a 502, and clients
+   retried them.** versitygw answers 403 or 412 before reading the body,
+   then closes the connection with the body unread. nginx, still
+   sending, got a reset and lost the answer.
+   - The proxy now answers a PUT or POST that the gateway cut off part
+     way with an S3 `AccessDenied`, saying the gateway refused the
+     upload. A gateway that's down gets an XML `ServiceUnavailable` (503),
+     and a portal that's down gets nginx's own page.
+   - The catch: an add-only "already exists" over ~256 KB shows as 403,
+     not 412, so `aws s3 cp --no-overwrite` reports a failure instead of
+     skipping.
+   - Upstream, versitygw should drain the body, up to a limit, or close
+     gracefully on early errors.
+2. **CreateBucket was answered as "already yours" even for buckets that
+   don't exist.** The proxy now asks the gateway with an anonymous
+   `HEAD /<bucket>`.
+   - 403 means the bucket exists: the answer is `BucketAlreadyOwnedByYou`.
+   - 404 means it doesn't: the answer is a 403 saying keys can't create
+     buckets.
+   - `rclone mkdir`, `aws s3 mb` and `mc mb` of a new name now fail
+     clearly, while rclone's check before uploading still passes for
+     buckets that exist.
+3. **Presigned POST (`mc share upload`) went to the portal.** Multipart
+   form posts now go to the gateway; the portal never takes them.
+4. **The gateway port is hard-coded.** `site.conf` now says so where it
+   matters.
+5. **The key page** has an mc snippet, says that listing all buckets
+   shows nothing, and gives per-client advice when the key has a
+   write-only or add-only bucket.
+
+## Still open
+
+- **Listing buckets shows nothing.** `aws s3 ls`, `rclone lsd s3:` and
+  `mc ls alias` come back empty, because versitygw's ListBuckets only
+  shows buckets a `user` account owns, not ones granted by policy. The
+  portal can't fix this; the key page says to name the bucket. Worth
+  raising with versitygw upstream.
+- **Client limits, documented on the key page:**
+  - **Write-only keys:**
+    - rclone: set `no_head = true` and use `copy --no-check-dest` (or
+      `--no-traverse`). Never `sync`, or `copy` without those flags.
+    - aws: `s3 cp` works, `s3 sync` doesn't.
+    - mc: `cp` works, `mirror` doesn't.
+  - **Add-only keys:**
+    - aws: `s3 cp --no-overwrite` works. Set
+      `s3.multipart_threshold = 5GB` for files over 8 MB.
+    - mc: `cp -H "If-None-Match:*" --disable-multipart` works.
+    - rclone 1.60 can't send `If-None-Match`, so it can't use add-only
+      keys at all.
+  - **mc mirror:** it reports success when every upload is refused, so
+    don't use it with read-only or add-only keys.
+  - **mc admin:** it doesn't apply here, and fails with a confusing
+    region message.
 
 ## Not tested
 

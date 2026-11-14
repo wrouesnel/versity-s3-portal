@@ -1,4 +1,7 @@
 {{template "header" .}}
+{{$eg := "BUCKET"}}{{range $b, $p := .Grants}}{{$eg = $b}}{{break}}{{end}}
+{{$wo := false}}{{$co := false}}
+{{range $b, $p := .Grants}}{{if eq $p "writeonly"}}{{$wo = true}}{{end}}{{if eq $p "createonly"}}{{$co = true}}{{end}}{{end}}
 <section class="card">
   <h1>Key created: {{.KeyLabel}}</h1>
   <p class="flash warning">Copy the secret now. It isn't shown again. If you lose it, revoke the key and make a new one.</p>
@@ -7,8 +10,11 @@
     <dt>Secret access key</dt><dd><code class="copy">{{.KeySecret}}</code></dd>
     <dt>Endpoint</dt><dd><code class="copy">{{.S3URL}}</code></dd>
     <dt>Region</dt><dd><code>{{.Region}}</code></dd>
+    <dt>Addressing</dt><dd>Path style</dd>
     <dt>Buckets</dt><dd>{{if .Grants}}{{template "perms" .Grants}}{{else}}<span class="muted">none yet</span>{{end}}</dd>
   </dl>
+  <p class="muted small">Always name the bucket: listing every bucket (<code>aws s3 ls</code>, <code>rclone lsd s3:</code>, <code>mc ls s3</code>) shows nothing for a key, even one that reaches several. Buckets are made here in the portal, not by keys.</p>
+
   <h2>rclone</h2>
   <pre class="copy">[s3]
 type = s3
@@ -18,12 +24,39 @@ secret_access_key = {{.KeySecret}}
 endpoint = {{.S3URL}}
 region = {{.Region}}
 force_path_style = true
-no_check_bucket = true</pre>
-  <p class="muted">Buckets are made here in the portal, not by keys. rclone works without the <code>no_check_bucket</code> line, but it saves rclone a request: without it, rclone tries to create the bucket first.</p>
-  {{range $b, $p := .Grants}}{{if eq $p "createonly"}}<p class="flash warning">This key can only <strong>add</strong> files to {{$b}}: every upload must send <code>If-None-Match: *</code> and be a single PUT (no multipart). With the AWS CLI that's <code>aws s3api put-object --if-none-match '*'</code>.</p>{{end}}{{end}}
+no_check_bucket = true{{if $wo}}
+no_head = true{{end}}</pre>
+  <p class="muted small"><code>no_check_bucket</code> is optional: it saves rclone trying to create the bucket first.{{if $wo}} <code>no_head</code> is for the write-only bucket, as below.{{end}}</p>
+
+  <h2>MinIO client (mc)</h2>
+  <pre class="copy">mc alias set s3 {{.S3URL}} {{.KeyAccess}} {{.KeySecret}} --api S3v4 --path on
+mc ls s3/{{$eg}}/</pre>
+
   <h2>AWS CLI</h2>
   <pre class="copy">AWS_ACCESS_KEY_ID={{.KeyAccess}} AWS_SECRET_ACCESS_KEY={{.KeySecret}} \
-  aws --endpoint-url {{.S3URL}} --region {{.Region}} s3 ls s3://BUCKET/</pre>
+  aws --endpoint-url {{.S3URL}} --region {{.Region}} s3 ls s3://{{$eg}}/</pre>
+
+  {{if $wo}}
+  <div class="flash warning">
+    <p><strong>Write only</strong> ({{at .Grants "writeonly"}}): the key can upload but not list or read, and many tools look before they write.</p>
+    <ul class="small">
+      <li>rclone: <code>no_head = true</code> and <code>rclone copy --no-check-dest</code> (or <code>--no-traverse</code>). Not <code>sync</code>, and not <code>copy</code> without those flags: it uploads, then fails to check and uploads again.</li>
+      <li>mc: <code>mc cp</code> works; <code>mc mirror</code> doesn't.</li>
+      <li>AWS CLI: <code>aws s3 cp</code> works; <code>aws s3 sync</code> doesn't.</li>
+    </ul>
+  </div>
+  {{end}}
+  {{if $co}}
+  <div class="flash warning">
+    <p><strong>Add only</strong> ({{at .Grants "createonly"}}): every upload must ask not to overwrite (<code>If-None-Match: *</code>) and be a single upload, not multipart.</p>
+    <ul class="small">
+      <li>AWS CLI: <code>aws s3 cp --no-overwrite</code>, which skips files that exist. For files over 8 MB, first <code>aws configure set default.s3.multipart_threshold 5GB</code>. <code>aws s3 sync</code> doesn't work.</li>
+      <li>mc: <code>mc cp -H "If-None-Match:*" --disable-multipart</code>.</li>
+      <li>rclone can't send <code>If-None-Match</code>, so it can't upload with this key.</li>
+      <li>Don't use <code>mc mirror</code>: it reports success even when every upload is refused.</li>
+    </ul>
+  </div>
+  {{end}}
   <p><a class="button" href="/keys">Done</a></p>
 </section>
 {{template "footer" .}}

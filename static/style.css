@@ -344,3 +344,5 @@ table.keys .bucket-name { font-family: ui-monospace, "SF Mono", Menlo, Consolas,
 html:not(.js) .grant-add, html:not(.js) .grants-empty { display: none; }
 .grants-editor table.grants { max-width: 900px; }
 input[name=label] { max-width: 420px; }
+.flash ul { margin: 4px 0 0; padding-left: 20px; }
+.flash p:last-child, .flash ul:last-child { margin-bottom: 0; }

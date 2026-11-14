@@ -88,8 +88,11 @@ they pick.
     whenever anything they depend on changes. Only policies that actually
     changed are sent. Tools that create the bucket before uploading, as
     rclone does, would fail with AccessDenied, so the TLS proxy in
-    `deploy/` answers a signed CreateBucket with BucketAlreadyOwnedByYou
-    instead of passing it on.
+    `deploy/` answers a signed CreateBucket itself: BucketAlreadyOwnedByYou
+    when the bucket exists, and otherwise a refusal saying to make it in
+    the portal. The proxy also turns the gateway's early refusals of large
+    uploads into S3 errors, and sends presigned POST uploads to the
+    gateway; see [docs/client-compatibility.md](docs/client-compatibility.md).
   - A key asks for a level on each bucket, no more than its owner has when
     it's made. What it gets is that level limited by what its owner has
     *now*. When someone leaves a group, is disabled, or a grant is taken
