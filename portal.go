@@ -71,12 +71,15 @@ type Portal struct {
 	// written is a hash of each bucket's policy as last written, so
 	// resyncing everything only touches buckets whose policy changed.
 	written map[string][32]byte
+
+	mirrors mirrors
 }
 
 const bucketCacheTTL = 5 * time.Second
 
 func NewPortal(vgw *VGW, store *Store) *Portal {
-	return &Portal{vgw: vgw, store: store, written: map[string][32]byte{}}
+	return &Portal{vgw: vgw, store: store, written: map[string][32]byte{},
+		mirrors: mirrors{jobs: map[string]*mirrorJob{}, wake: make(chan struct{}, 1)}}
 }
 
 // listBuckets is the gateway's bucket list, from the cache when it's fresh.
@@ -436,18 +439,22 @@ func access(name string, person *Person, ownerAcct string, meta *BucketMeta) (Ca
 	if person == nil || person.Disabled {
 		return Caps{}, nil
 	}
-	if ownerAcct == ownerAccess(name) {
-		return PermReadWrite.Caps(), nil
-	}
 	var c Caps
 	var via []string
-	for g, perm := range meta.Groups {
-		if person.InGroup(g) {
-			c = c.Union(perm.Caps())
-			via = append(via, g)
+	if ownerAcct == ownerAccess(name) {
+		c = PermReadWrite.Caps()
+	} else {
+		for g, perm := range meta.Groups {
+			if person.InGroup(g) {
+				c = c.Union(perm.Caps())
+				via = append(via, g)
+			}
 		}
+		sort.Strings(via)
 	}
-	sort.Strings(via)
+	if meta.ReadOnly {
+		c = c.Intersect(PermRead.Caps())
+	}
 	return c, via
 }
 
@@ -619,6 +626,9 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 	if !v.Manage {
 		return userErr("Only the bucket's owner or an admin can delete it.")
 	}
+	if m, ok := p.store.Mirror(name); ok && m.Active() {
+		return userErr("Bucket %q is being mirrored in. An admin can abandon the mirror first.", name)
+	}
 	if p.zfs != nil {
 		// The gateway can't remove a mounted dataset; the helper can.
 		err = p.destroyBucket(ctx, name)
@@ -642,6 +652,9 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 		}
 	}
 	if err := p.store.PutBucketMeta(name, &BucketMeta{}); err != nil {
+		return err
+	}
+	if err := p.forgetMirror(name); err != nil {
 		return err
 	}
 	slog.Info("deleted bucket", "user", u.Name, "bucket", name)
@@ -997,6 +1010,11 @@ func (p *Portal) policyGrants(bucket, owner string, people map[string]*Person) m
 		if c, _ := access(name, people[name], owner, meta); c.Any() {
 			grants[w.Access] = c
 		}
+	}
+	// A mirror writes through its own account, whatever holds everyone
+	// else to reading.
+	if m, ok := p.store.Mirror(bucket); ok && m.Active() && m.Account.Access != "" {
+		grants[m.Account.Access] = PermReadWrite.Caps()
 	}
 	return grants
 }

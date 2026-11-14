@@ -179,9 +179,34 @@ they pick.
     read & write can restore a file, a folder or everything, replacing
     what's there now (files added since are kept). The portal only touches
     its own snapshots, named `s3portal-…`.
+- **Mirrors** (admins): copy a bucket on another S3 service, such as
+  MinIO, into a bucket here.
+  - **Passes:** they run hourly, daily or by hand. Each one copies new and
+    changed objects with their metadata, deletes what the source deleted,
+    and repairs copies that went missing. It records what it copied in a
+    manifest, snapshots the bucket on ZFS, and writes a report.
+  - **Read only:** while it mirrors, the bucket is read only for everyone,
+    its owner included. So any difference from the source is either a
+    change at the source or a failed copy.
+  - **Moving over:**
+    1. The admin stops writes to the source and freezes the mirror.
+    2. A final pass copies the last changes.
+    3. The source is listed again, to catch anything still writing.
+    4. Every object is checked against the MD5 of what was copied, and
+       against the source's own MD5 where it has one. A deep check reads
+       back the objects that have no source MD5.
+    5. Once that passes, the admin completes the move. The bucket opens to
+       its users, and the source key is forgotten.
+  - **What the page shows:** each step, who took it, and the evidence.
+  - **What it doesn't do:** it never writes to the source, and nothing
+    else is carried over (versions, tags, ACLs, policies, the source's
+    keys).
+  - See `docs/design-bucket-mirror.md`.
 - **State:** `STATE_FILE` is a JSON file with each key's owner, name and
-  grants, bucket group grants, everyone the portal knows, sessions, and web
-  account credentials. Key secrets live only in the gateway.
+  grants, bucket group grants, everyone the portal knows, sessions, web
+  account credentials, and mirrors, with their source keys until each
+  move is complete. Key secrets live only in the gateway. Each mirror's
+  manifest and pass reports are under `mirrors/<bucket>/` beside it.
 - **Reconcile at startup:** the portal drops keys and web accounts the
   gateway no longer has, and grants and settings for buckets that are gone.
   Then it rewrites every bucket's policy.
@@ -228,7 +253,7 @@ they pick.
 | `OIDC_UID_CLAIM`, `OIDC_GID_CLAIM` | Claims holding numeric uid and gid, if the provider has them |
 | `OIDC_DEFAULT_UID`, `OIDC_DEFAULT_GID` | The uid and gid for everyone otherwise (not 0) |
 | `SESSION_KEY` | At least 32 random characters for signing session cookies (or `SESSION_KEY_FILE`) |
-| `STATE_FILE` | Where key records are kept |
+| `STATE_FILE` | Where key records are kept. Its directory must be writable: mirrors keep files there too |
 | `PUBLIC_S3_URL` | The S3 endpoint as users should configure it |
 | `TITLE` | Page title (default `S3 access keys`) |
 | `LISTEN` | Listen address (default `:8080`) |
@@ -303,6 +328,9 @@ that the gateway follows symlinks planted in a bucket directory.
 `TestPermissionsAgainstGateway` pins down what keys, web accounts and
 anonymous callers can and can't do, as observed on the gateway: run it after
 any gateway upgrade.
+The mirror tests use other buckets on the same gateway as sources. With
+`MIRROR_TEST_S3`, `MIRROR_TEST_ACCESS` and `MIRROR_TEST_SECRET` pointing
+at another S3 service, such as a MinIO server, one also mirrors from that.
 
 ```sh
 podman run -d --name vgw -p 7070:7070 -p 7071:7071 \

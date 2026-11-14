@@ -2,7 +2,7 @@
   --bg: #f3f4f6; --card: #fff; --text: #15181c; --muted: #646e79; --border: #dde1e6; --hover: #eef1f4;
   --accent: #2563c9; --accent-hover: #1d50a6; --accent-text: #fff; --accent-soft: #e6eefb;
   --danger: #b8322a; --danger-soft: #fbeaea;
-  --ok-soft: #e4f2e8; --warn-soft: #fbf1d9; --code-bg: #eef0f3;
+  --ok: #2f8a4a; --ok-soft: #e4f2e8; --warn-soft: #fbf1d9; --code-bg: #eef0f3;
   --radius: 4px;
   --top: 44px;
   --side: 280px;
@@ -12,7 +12,7 @@
     --bg: #101216; --card: #171a1f; --text: #e6e9ed; --muted: #939ca7; --border: #2a2e35; --hover: #1f2329;
     --accent: #6ea2f5; --accent-hover: #8ab4f8; --accent-text: #0d1015; --accent-soft: #1b2739;
     --danger: #f28b82; --danger-soft: #3a1f1d;
-    --ok-soft: #1a3022; --warn-soft: #362c14; --code-bg: #22262c;
+    --ok: #5cc27a; --ok-soft: #1a3022; --warn-soft: #362c14; --code-bg: #22262c;
   }
 }
 * { box-sizing: border-box; }
@@ -59,11 +59,11 @@ p { margin: 0 0 10px; }
 /* Forms and buttons */
 label { display: block; margin-bottom: 12px; font-weight: 500; }
 label.button { margin: 0; }
-input:not([type=radio]):not([type=file]) { display: block; width: 100%; margin-top: 4px; padding: 5px 8px; font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+input:not([type=radio]):not([type=file]):not([type=checkbox]) { display: block; width: 100%; margin-top: 4px; padding: 5px 8px; font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
 input:focus-visible, button:focus-visible, .button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.row input:not([type=radio]):not([type=file]) { flex: 1; width: auto; min-width: 180px; margin: 0; }
-.row.compact input:not([type=radio]):not([type=file]) { min-width: 160px; flex: 0 1 220px; }
+.row input:not([type=radio]):not([type=file]):not([type=checkbox]) { flex: 1; width: auto; min-width: 180px; margin: 0; }
+.row.compact input:not([type=radio]):not([type=file]):not([type=checkbox]) { min-width: 160px; flex: 0 1 220px; }
 form { margin: 0; }
 button, .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 4px 12px; font: inherit; font-weight: 500; line-height: 1.45; color: var(--accent-text); background: var(--accent); border: 1px solid transparent; border-radius: var(--radius); cursor: pointer; text-decoration: none !important; white-space: nowrap; }
 button:hover, .button:hover { background: var(--accent-hover); }
@@ -168,7 +168,7 @@ ul.uploads progress { width: 100%; accent-color: var(--accent); }
   td.when, th.when { display: none; }
   dl { grid-template-columns: 1fr; gap: 2px; }
   dd { margin-bottom: 8px; }
-  .row.compact input:not([type=radio]):not([type=file]) { flex: 1 1 140px; }
+  .row.compact input:not([type=radio]):not([type=file]):not([type=checkbox]) { flex: 1 1 140px; }
 }
 
 /* Files: a full-height two-pane layout, buckets on the left */
@@ -186,7 +186,7 @@ html.side-closed .sidebar, html.side-closed .side-resize { display: none; }
 .side-tools { position: sticky; top: 0; z-index: 2; display: flex; gap: 6px; padding: 10px 10px 8px; background: var(--bg); }
 .side-tools input[type=search] { margin: 0; flex: 1; min-width: 0; padding: 3px 8px; }
 .side-tools .pop { left: 0; right: auto; }
-.side-tools .pop input:not([type=radio]):not([type=file]) { min-width: 200px; }
+.side-tools .pop input:not([type=radio]):not([type=file]):not([type=checkbox]) { min-width: 200px; }
 .side-note { margin: 4px 14px; }
 .bucket-nav h2 { display: flex; justify-content: space-between; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 10px 14px 2px; }
 .bucket-nav .count { font-variant-numeric: tabular-nums; letter-spacing: 0; }
@@ -217,7 +217,7 @@ section.danger-zone h2 { margin-top: 0; color: var(--danger); }
 td.actions form { display: inline-flex; }
 @media (max-width: 800px) {
   /* Without the script: the list above the files. */
-  .split, html.side-closed .split { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .split, html.side-closed .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .sidebar { position: static; height: auto; max-height: 40vh; border-bottom: 1px solid var(--border); }
   .side-resize { display: none; }
   /* With it: a drawer from the left, opened by the hamburger. */
@@ -229,9 +229,9 @@ td.actions form { display: inline-flex; }
 
 /* Storage and snapshots */
 dl.storage { margin-bottom: 16px; }
-dl.storage input:not([type=radio]):not([type=file]) { min-width: 0; flex: 0 1 120px; }
+dl.storage input:not([type=radio]):not([type=file]):not([type=checkbox]) { min-width: 0; flex: 0 1 120px; }
 .inline-label { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-weight: 400; }
-.inline-label input:not([type=radio]):not([type=file]) { width: 70px; margin: 0; }
+.inline-label input:not([type=radio]):not([type=file]):not([type=checkbox]) { width: 70px; margin: 0; }
 a.snapshot { font-weight: 500; color: var(--text); }
 .snapshot-banner { margin: 6px 0 12px; }
 .restore-all { margin-top: 14px; }
@@ -346,3 +346,39 @@ html:not(.js) .grant-add, html:not(.js) .grants-empty { display: none; }
 input[name=label] { max-width: 420px; }
 .flash ul { margin: 4px 0 0; padding-left: 20px; }
 .flash p:last-child, .flash ul:last-child { margin-bottom: 0; }
+
+/* Mirrors */
+label.check { display: flex; gap: 8px; align-items: baseline; font-weight: 400; margin-bottom: 6px; }
+label.check input { display: inline-block; width: auto; margin: 0; flex: none; }
+fieldset.choices { border: 0; padding: 0; margin: 0 0 12px; }
+fieldset.choices legend { font-weight: 500; padding: 0; margin-bottom: 4px; }
+.mirror-form { max-width: 640px; }
+.mirror-form h2 { margin-top: 20px; }
+.mirror-form select { display: block; margin-top: 4px; }
+.field-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.field-row > label { flex: 1 1 200px; }
+.mirror-grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(300px, 1.4fr); gap: 8px 32px; align-items: start; }
+@media (max-width: 900px) { .mirror-grid { grid-template-columns: 1fr; } }
+.mirror-freeze { margin-bottom: 16px; }
+.mirror-freeze button { margin-top: 6px; }
+ol.checklist { list-style: none; padding: 0; margin: 0 0 12px; }
+ol.checklist li { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--border); }
+ol.checklist li:last-child { border-bottom: 0; }
+ol.checklist .tick { flex: none; width: 16px; height: 16px; margin-top: 2px; border-radius: 50%; border: 1.5px solid var(--border); box-sizing: border-box; }
+ol.checklist li.done .tick { background: var(--ok); border-color: var(--ok); }
+ol.checklist li.current .tick { background: var(--accent); border-color: var(--accent); }
+ol.checklist li:not(.done):not(.current) strong { color: var(--muted); font-weight: 500; }
+ul.problems { max-height: 320px; overflow: auto; margin: 4px 0 12px; padding-left: 20px; }
+dl.verification { font-size: .9rem; }
+.table-scroll { overflow-x: auto; }
+/* A header can't stick to the page from inside a scrolling box. */
+.table-scroll thead th { position: static; }
+.mirror-passes td, .mirror-passes th { white-space: nowrap; }
+/* Wide admin tables scroll on their own on narrow screens; on wide ones
+   they don't, so their headers can stay stuck to the top. */
+@media (max-width: 800px) { .narrow-scroll { overflow-x: auto; } .narrow-scroll thead th { position: static; } }
+@media (max-width: 800px) {
+  /* A menu inside a scrolling table would be cut off at its edge, so it
+     opens as a sheet along the bottom of the screen instead. */
+  .narrow-scroll details.menu .pop, .table-scroll details.menu .pop { position: fixed; top: auto; left: 8px; right: 8px; bottom: 8px; z-index: 30; }
+}

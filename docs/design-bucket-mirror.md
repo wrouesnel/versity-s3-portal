@@ -1,6 +1,7 @@
 # Design: mirroring a bucket in, then cutting over
 
-Status: proposal, not built.
+Status: built. Where the build differs from the proposal below, the
+differences are listed under "As built" at the end.
 
 An admin registers a bucket here as a **mirror** of a bucket on another
 S3 service. The portal copies the source into it on a schedule. When the
@@ -293,3 +294,57 @@ The registration page and the final report both say this:
    root-only file. The store already holds the web account secrets, so it
    adds no new class of risk. But it does mean the secret is entered in
    a browser form.
+
+## As built
+
+Decisions on the open questions:
+
+1. **Deletions** are copied, as designed.
+2. **Read-only** applies while mirroring, as designed.
+3. **The source secret** is kept in the store.
+
+Differences from the proposal:
+
+- **The mirror's account.** It writes as `mirror.<bucket>`, a gateway
+  account with the owner's uid and gid, granted read & write on the bucket
+  until the mirror ends. It isn't the owner's web account, which is held to
+  reading like everyone else. Ending the mirror deletes the account.
+- **Changes mid-copy.** Copies don't use `If-Match`. The manifest records
+  the ETag and size from the GET response itself, which always describe
+  the bytes that were read. A change mid-copy then simply shows up as a
+  change on the next pass.
+- **The content check:**
+  - An object counts as matching end to end when the source's ETag, the
+    MD5 of what was read, and the target's ETag are all the same.
+  - Otherwise it's matched by size, and the target's ETag must be the one
+    the gateway gave when it was written. That covers sources uploaded in
+    parts, sources that encrypt, and anything over the part threshold here.
+  - The deep check reads these objects back from the target and compares
+    them with the MD5 taken while copying. It doesn't read the source
+    again: the quiet check has already shown the source's ETags haven't
+    changed.
+- **Keys that can't be copied:**
+  - Keys that are invalid as paths are found by name.
+  - Keys under `.zfs/` or `.sgwtmp/` are reserved here, and are also found
+    by name.
+  - A file and a folder with the same name is found when the gateway
+    refuses the write. Its error codes are `ExistingObjectIsDirectory`,
+    `ObjectParentIsFile` and `DirectoryObjectContainsData`.
+  - Accepting them records the set's hash. The acceptance holds while
+    later passes find the same set.
+- **Listings** must come back in key order. A pass stops with an error if
+  either side's listing goes backwards, rather than risk wrong deletions.
+  versitygw and MinIO both list in byte order.
+- **Stopping.**
+  - Freezing, abandoning and completing all stop a running pass first.
+  - A pass that stops early leaves the previous manifest in place, and
+    the next pass copies again whatever it can't vouch for.
+  - Restarting the portal stops a pass the same way. A final pass that was
+    stopped is run again by hand.
+- **Not built:** a live progress push. The mirror's page reloads itself
+  every 10 seconds while a pass runs.
+
+Tested against versitygw 1.10.0 as the target, and versitygw and a MinIO
+server built from source as sources. The MinIO test covers keys needing
+URL encoding, a multipart-uploaded source object, and `a-b` sorting
+before `a/b`.

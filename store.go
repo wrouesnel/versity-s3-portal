@@ -60,6 +60,9 @@ type BucketMeta struct {
 	Groups map[string]Perm `json:"groups,omitempty"`
 	// Snapshots is how often to snapshot the bucket's dataset, if ever.
 	Snapshots SnapshotSchedule `json:"snapshots,omitzero"`
+	// ReadOnly holds everyone to reading, whatever they've been granted,
+	// while the bucket is being mirrored in.
+	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
 // SnapshotSchedule takes a snapshot every Every and keeps the latest Keep.
@@ -69,10 +72,12 @@ type SnapshotSchedule struct {
 	Keep  int    `json:"keep,omitempty"`
 }
 
-func (m *BucketMeta) empty() bool { return len(m.Groups) == 0 && m.Snapshots.Every == "" }
+func (m *BucketMeta) empty() bool {
+	return len(m.Groups) == 0 && m.Snapshots.Every == "" && !m.ReadOnly
+}
 
 func copyMeta(m *BucketMeta) *BucketMeta {
-	c := &BucketMeta{Groups: map[string]Perm{}, Snapshots: m.Snapshots}
+	c := &BucketMeta{Groups: map[string]Perm{}, Snapshots: m.Snapshots, ReadOnly: m.ReadOnly}
 	for g, p := range m.Groups {
 		c.Groups[g] = p
 	}
@@ -98,6 +103,9 @@ type state struct {
 	People   map[string]*Person        `json:"people,omitempty"`
 	Buckets  map[string]*BucketMeta    `json:"buckets,omitempty"`
 	Sessions map[string]*SessionRecord `json:"sessions,omitempty"`
+	// Mirrors are buckets being copied in from another S3 service, and
+	// the record of ones that were, by bucket.
+	Mirrors map[string]*Mirror `json:"mirrors,omitempty"`
 }
 
 // Store is a JSON file of the portal's state. Each method is safe to call
@@ -139,6 +147,9 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if st.Sessions == nil {
 		st.Sessions = map[string]*SessionRecord{}
+	}
+	if st.Mirrors == nil {
+		st.Mirrors = map[string]*Mirror{}
 	}
 	return s, nil
 }
@@ -402,6 +413,44 @@ func (s *Store) BucketsWithMeta() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return sortedKeys(s.state.Buckets)
+}
+
+// ---------------------------------------------------------------- mirrors
+
+// Mirror returns bucket's mirror record, if it has one.
+func (s *Store) Mirror(bucket string) (*Mirror, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.state.Mirrors[bucket]
+	if !ok {
+		return nil, false
+	}
+	return m.clone(), true
+}
+
+func (s *Store) PutMirror(bucket string, m *Mirror) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Mirrors[bucket] = m.clone()
+	return s.save()
+}
+
+func (s *Store) DeleteMirror(bucket string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.state.Mirrors, bucket)
+	return s.save()
+}
+
+// Mirrors returns every mirror record, by bucket.
+func (s *Store) Mirrors() map[string]*Mirror {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]*Mirror, len(s.state.Mirrors))
+	for b, m := range s.state.Mirrors {
+		out[b] = m.clone()
+	}
+	return out
 }
 
 // --------------------------------------------------------------- sessions

@@ -90,6 +90,19 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 			sort.Strings(out)
 			return strings.Join(out, ", ")
 		},
+		// dur is how long from a to b, roughly.
+		"dur": func(a, b time.Time) string {
+			if b.IsZero() {
+				b = time.Now()
+			}
+			if d := b.Sub(a); d < time.Hour {
+				return d.Round(time.Second).String()
+			} else {
+				return d.Round(time.Minute).String()
+			}
+		},
+		"since":     func(a time.Time) string { return time.Since(a).Round(time.Second).String() },
+		"hasPrefix": strings.HasPrefix,
 		"pct": func(n, of int64) int64 {
 			if of <= 0 {
 				return 0
@@ -192,6 +205,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/end-sessions", s.authed(s.admin(s.adminEndSessions)))
 	mux.HandleFunc("POST /admin/trash/restore", s.authed(s.admin(s.adminRestoreTrash)))
 	mux.HandleFunc("POST /admin/trash/purge", s.authed(s.admin(s.adminPurgeTrash)))
+	s.mirrorRoutes(mux)
 	// API, for automation and scripts.
 	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
 	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
@@ -268,6 +282,14 @@ type page struct {
 	AllBuckets []BucketSummary
 	Directory  bool
 	Trash      []ZFSTrashEntry
+	// Mirrors: the admin list, one mirror's page, or the open bucket's
+	// mirror; and the new-mirror form.
+	Mirrors    []MirrorView
+	Mirror     *MirrorView
+	MirrorForm *MirrorRequest
+	// AutoRefresh reloads the page every few seconds, while a mirror pass
+	// runs.
+	AutoRefresh bool
 }
 
 // selView is what the selection bar and folder menus need.
@@ -445,6 +467,7 @@ func (s *Server) sidebar(r *http.Request, sess *Session, p *page, open string) e
 			return err
 		}
 		p.Open = &v
+		p.Mirror = s.Portal.BucketMirror(open)
 	}
 	return nil
 }
@@ -1086,7 +1109,7 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 	p := s.base(w, r, sess, "admin")
 	p.Section = r.URL.Query().Get("section")
 	switch p.Section {
-	case "buckets", "keys", "trash", "revoke":
+	case "buckets", "keys", "trash", "revoke", "mirrors":
 	default:
 		p.Section = "people"
 	}
@@ -1094,6 +1117,20 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 	if p.Section == "buckets" {
 		p.Sizes = s.Portal.BucketSizes(r.Context())
 	}
+	s.adminCounts(r, sess, &p)
+	if p.Section == "mirrors" {
+		p.AutoRefresh = false
+		for _, m := range p.Mirrors {
+			if m.Running != nil {
+				p.AutoRefresh = true
+			}
+		}
+	}
+	s.render(w, http.StatusOK, "admin.html", p)
+}
+
+// adminCounts fills in what the admin sections list, and so count.
+func (s *Server) adminCounts(r *http.Request, sess *Session, p *page) {
 	p.AllKeys = s.Portal.AllKeys()
 	for _, e := range p.AllKeys {
 		if len(p.Owners) == 0 || p.Owners[len(p.Owners)-1] != e.Owner {
@@ -1114,7 +1151,7 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 	} else {
 		p.Trash = trash
 	}
-	s.render(w, http.StatusOK, "admin.html", p)
+	p.Mirrors, _ = s.Portal.MirrorList(sess.User)
 }
 
 func (s *Server) adminRestoreTrash(w http.ResponseWriter, r *http.Request, sess *Session) {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{{if .Refresh}}<meta http-equiv="refresh" content="0; url={{.Refresh}}">{{end}}
+{{if .Refresh}}<meta http-equiv="refresh" content="0; url={{.Refresh}}">{{else if .AutoRefresh}}<meta http-equiv="refresh" content="10">{{end}}
 <title>{{.Title}}</title>
 <link rel="icon" href="{{asset "bucket.svg"}}" type="image/svg+xml">
 <link rel="stylesheet" href="{{asset "style.css"}}">

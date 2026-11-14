@@ -44,6 +44,7 @@
     {{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
     {{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
     </div>
+    {{with .Mirror}}{{if .Active}}<p class="flash warning mirror-banner">Being mirrored in from <code>{{.Source.Label}}</code>: read only until the move is complete.{{if $.User.Admin}} <a href="/admin/mirror?bucket={{.Bucket}}">The mirror</a>{{end}}</p>{{end}}{{end}}
 
     {{if not .Open}}
     <div class="pane-head">
@@ -160,6 +161,16 @@
         </form>
       </dd>
     </dl>
+    {{end}}
+    {{with .Mirror}}
+    <h2>{{if .Active}}Being mirrored in{{else}}Mirrored in{{end}}</h2>
+    <dl class="storage">
+      <dt>From</dt><dd><code>{{.Source.Label}}</code></dd>
+      <dt>State</dt><dd>{{.State.Label}}{{if $.User.Admin}} <a class="small" href="/admin/mirror?bucket={{.Bucket}}">details</a>{{end}}</dd>
+      {{with .LastPass}}<dt>Last pass</dt><dd>{{.Finished.Local.Format "Mon 2 Jan 2006 15:04"}}: {{.MirroredObjects}} objects, {{humanSize .MirroredBytes}}</dd>{{end}}
+      {{with .Verification}}<dt>Final check</dt><dd>{{if .Passed}}<span class="pill ok">matched the source</span> {{.At.Local.Format "2 Jan 2006 15:04"}}: {{.Checked}} objects{{if .Snapshot}}, snapshot <code>{{.Snapshot}}</code>{{end}}{{else}}<span class="pill warn">not passed</span>{{end}}</dd>{{end}}
+    </dl>
+    <ul class="small muted">{{range .History}}<li>{{.At.Local.Format "2 Jan 2006 15:04"}} · {{.State.Label}} · {{.By}}{{if .Note}}: {{.Note}}{{end}}</li>{{end}}</ul>
     {{end}}
 
     {{else if eq .Section "delete"}}

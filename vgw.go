@@ -31,6 +31,9 @@ type VGW struct {
 	// Streams has no overall timeout, for object bodies of any size; the
 	// request's context bounds it.
 	Streams *http.Client
+	// Virtual addresses buckets as <bucket>.<host> rather than in the
+	// path. Only mirror sources use it; versitygw here is path style.
+	Virtual bool
 
 	signer *v4.Signer
 }
@@ -166,7 +169,11 @@ func (v *VGW) do(ctx context.Context, method, endpoint, path string, query url.V
 // stream sends a request whose body isn't hashed (UNSIGNED-PAYLOAD), so it
 // can be streamed, and returns the response for the caller to read and close.
 func (v *VGW) stream(ctx context.Context, method, path string, body io.Reader, length int64, headers map[string]string) (*http.Response, error) {
-	req, err := newRequest(ctx, method, v.S3Endpoint, path, nil, body)
+	return v.streamAt(ctx, method, v.S3Endpoint, path, nil, body, length, headers)
+}
+
+func (v *VGW) streamAt(ctx context.Context, method, endpoint, path string, query url.Values, body io.Reader, length int64, headers map[string]string) (*http.Response, error) {
+	req, err := newRequest(ctx, method, endpoint, path, query, body)
 	if err != nil {
 		return nil, err
 	}
