@@ -145,6 +145,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /buckets/delete", s.authed(s.deleteBucket))
 	mux.HandleFunc("GET /buckets/settings", s.authedGet(s.bucketSettings))
 	mux.HandleFunc("POST /buckets/groups", s.authed(s.setGroupGrant))
+	mux.HandleFunc("POST /buckets/keys/remove", s.authed(s.removeKeyFromBucket))
 	mux.HandleFunc("POST /buckets/quota", s.authed(s.setQuota))
 	mux.HandleFunc("POST /buckets/backup", s.authed(s.setBackup))
 	mux.HandleFunc("POST /buckets/schedule", s.authed(s.setSchedule))
@@ -230,9 +231,14 @@ type page struct {
 	Listing   *ObjectList
 	NextToken string
 	// Bucket settings.
-	Settings  bool
-	GroupList []string
-	Grantees  map[string]Perm
+	Settings bool
+	// Section is the part of a settings or admin page being shown.
+	Section string
+	// Filter starts a page's table filter with some text.
+	Filter     string
+	BucketKeys []BucketKey
+	GroupList  []string
+	Grantees   map[string]Perm
 	// ZFS: the open bucket's dataset, and the snapshot being browsed.
 	ZFS     bool
 	Storage *Storage
@@ -483,7 +489,7 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request, sess *Sess
 func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request, sess *Session) {
 	name := r.PostFormValue("name")
 	if err := s.Portal.DeleteBucket(r.Context(), sess.User, name); err != nil {
-		redirectFlash(w, r, "/buckets/settings?bucket="+url.QueryEscape(name), "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/buckets/settings?section=delete&bucket="+url.QueryEscape(name), "", userMessage(r, sess, err))
 		return
 	}
 	msg := "Deleted bucket " + name + "."
@@ -505,9 +511,26 @@ func (s *Server) bucketSettings(w http.ResponseWriter, r *http.Request, sess *Se
 		return
 	}
 	p.Settings = true
+	p.Section = r.URL.Query().Get("section")
+	switch p.Section {
+	case "keys", "delete":
+	case "storage":
+		if !p.ZFS {
+			p.Section = "access"
+		}
+	default:
+		p.Section = "access"
+	}
 	p.Grantees = s.Portal.store.BucketMeta(bucket).Groups
 	p.GroupList = s.Portal.Groups()
-	if p.ZFS {
+	if p.Section == "keys" {
+		keys, err := s.Portal.BucketKeys(r.Context(), sess.User, bucket)
+		if err != nil {
+			p.Error = userMessage(r, sess, err)
+		}
+		p.BucketKeys = keys
+	}
+	if p.ZFS && p.Section == "storage" {
 		st, err := s.Portal.Storage(r.Context(), sess.User, bucket)
 		if err != nil {
 			p.Error = userMessage(r, sess, err)
@@ -521,36 +544,46 @@ func (s *Server) settingsURL(bucket string) string {
 	return "/buckets/settings?bucket=" + url.QueryEscape(bucket)
 }
 
+func (s *Server) removeKeyFromBucket(w http.ResponseWriter, r *http.Request, sess *Session) {
+	bucket, access := r.PostFormValue("bucket"), r.PostFormValue("access")
+	back := s.settingsURL(bucket) + "&section=keys"
+	if err := s.Portal.RemoveKeyFromBucket(r.Context(), sess.User, access, bucket); err != nil {
+		redirectFlash(w, r, back, "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, back, "That key no longer reaches "+bucket+".", "")
+}
+
 func (s *Server) setQuota(w http.ResponseWriter, r *http.Request, sess *Session) {
 	bucket := r.PostFormValue("bucket")
 	bytes, err := ParseSize(r.PostFormValue("quota"))
 	if err != nil {
-		redirectFlash(w, r, s.settingsURL(bucket), "", "Give a size like 500G or 2T, or 0 for no limit.")
+		redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", "", "Give a size like 500G or 2T, or 0 for no limit.")
 		return
 	}
 	if err := s.Portal.SetQuota(r.Context(), sess.User, bucket, bytes); err != nil {
-		redirectFlash(w, r, s.settingsURL(bucket), "", userMessage(r, sess, err))
+		redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", "", userMessage(r, sess, err))
 		return
 	}
 	msg := "Removed the size limit."
 	if bytes > 0 {
 		msg = "Limited " + bucket + " to " + humanSize(bytes) + "."
 	}
-	redirectFlash(w, r, s.settingsURL(bucket), msg, "")
+	redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", msg, "")
 }
 
 func (s *Server) setBackup(w http.ResponseWriter, r *http.Request, sess *Session) {
 	bucket := r.PostFormValue("bucket")
 	include := r.PostFormValue("include") == "on"
 	if err := s.Portal.SetBackup(r.Context(), sess.User, bucket, include); err != nil {
-		redirectFlash(w, r, s.settingsURL(bucket), "", userMessage(r, sess, err))
+		redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", "", userMessage(r, sess, err))
 		return
 	}
 	msg := bucket + " is no longer backed up."
 	if include {
 		msg = bucket + " will be included in backups."
 	}
-	redirectFlash(w, r, s.settingsURL(bucket), msg, "")
+	redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", msg, "")
 }
 
 func (s *Server) setSchedule(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -561,18 +594,18 @@ func (s *Server) setSchedule(w http.ResponseWriter, r *http.Request, sess *Sessi
 	}
 	sched, err := ParseSchedule(spec)
 	if err != nil {
-		redirectFlash(w, r, s.settingsURL(bucket), "", "Pick how often, and keep between 1 and 1000 snapshots.")
+		redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", "", "Pick how often, and keep between 1 and 1000 snapshots.")
 		return
 	}
 	if err := s.Portal.SetSchedule(r.Context(), sess.User, bucket, sched); err != nil {
-		redirectFlash(w, r, s.settingsURL(bucket), "", userMessage(r, sess, err))
+		redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", "", userMessage(r, sess, err))
 		return
 	}
 	msg := "Scheduled snapshots are off."
 	if sched.Every != "" {
 		msg = fmt.Sprintf("Snapshots %s, keeping the last %d.", sched.Every, sched.Keep)
 	}
-	redirectFlash(w, r, s.settingsURL(bucket), msg, "")
+	redirectFlash(w, r, s.settingsURL(bucket)+"&section=storage", msg, "")
 }
 
 func (s *Server) snapshotsURL(bucket string) string {
@@ -923,7 +956,21 @@ func (s *Server) keyForm(w http.ResponseWriter, r *http.Request, sess *Session, 
 }
 
 func (s *Server) newKey(w http.ResponseWriter, r *http.Request, sess *Session) {
-	s.keyForm(w, r, sess, "key_new.html", http.StatusOK, page{})
+	p := page{}
+	// From a bucket's settings: start with that bucket at the most the
+	// person can give.
+	if b := r.URL.Query().Get("bucket"); b != "" {
+		if v, err := s.Portal.Bucket(r.Context(), sess.User, b, false); err == nil {
+			for _, perm := range Perms {
+				if v.Caps.Covers(perm.Caps()) {
+					p.Grants = map[string]Perm{b: perm}
+					p.KeyLabel = b
+					break
+				}
+			}
+		}
+	}
+	s.keyForm(w, r, sess, "key_new.html", http.StatusOK, p)
 }
 
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -1008,6 +1055,16 @@ func (s *Server) admin(h handler) handler {
 
 func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session) {
 	p := s.base(w, r, sess, "admin")
+	p.Section = r.URL.Query().Get("section")
+	switch p.Section {
+	case "buckets", "keys", "trash", "revoke":
+	default:
+		p.Section = "people"
+	}
+	p.Filter = r.URL.Query().Get("owner")
+	if p.Section == "buckets" {
+		p.Sizes = s.Portal.BucketSizes(r.Context())
+	}
 	p.AllKeys = s.Portal.AllKeys()
 	for _, e := range p.AllKeys {
 		if len(p.Owners) == 0 || p.Owners[len(p.Owners)-1] != e.Owner {
@@ -1034,41 +1091,41 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 func (s *Server) adminRestoreTrash(w http.ResponseWriter, r *http.Request, sess *Session) {
 	entry := r.PostFormValue("entry")
 	if err := s.Portal.RestoreTrash(r.Context(), sess.User, entry); err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=trash", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", "Restored the bucket. Give its groups and keys access again.", "")
+	redirectFlash(w, r, "/admin?section=trash", "Restored the bucket. Give its groups and keys access again.", "")
 }
 
 func (s *Server) adminPurgeTrash(w http.ResponseWriter, r *http.Request, sess *Session) {
 	entry := r.PostFormValue("entry")
 	if err := s.Portal.PurgeTrash(r.Context(), sess.User, entry); err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=trash", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", "Purged "+entry+" for good.", "")
+	redirectFlash(w, r, "/admin?section=trash", "Purged "+entry+" for good.", "")
 }
 
 func (s *Server) adminRevoke(w http.ResponseWriter, r *http.Request, sess *Session) {
 	if err := s.Portal.RevokeKey(r.Context(), sess.User, r.PostFormValue("access")); err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=keys", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", "Revoked the key.", "")
+	redirectFlash(w, r, "/admin?section=keys", "Revoked the key.", "")
 }
 
 func (s *Server) adminRevokeUser(w http.ResponseWriter, r *http.Request, sess *Session) {
 	owner := r.PostFormValue("owner")
 	if owner == "" {
-		redirectFlash(w, r, "/admin", "", "Pick whose keys to revoke.")
+		redirectFlash(w, r, "/admin?section=people", "", "Pick whose keys to revoke.")
 		return
 	}
 	n, err := s.Portal.RevokeKeys(r.Context(), sess.User, owner)
 	if err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=people", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", fmt.Sprintf("Revoked %d of %s's keys.", n, owner), "")
+	redirectFlash(w, r, "/admin?section=people", fmt.Sprintf("Revoked %d of %s's keys.", n, owner), "")
 }
 
 // revokeAllPhrase must be typed to revoke every key, so it can't happen by a
@@ -1077,48 +1134,48 @@ const revokeAllPhrase = "revoke all"
 
 func (s *Server) adminRevokeAll(w http.ResponseWriter, r *http.Request, sess *Session) {
 	if strings.ToLower(strings.TrimSpace(r.PostFormValue("confirm"))) != revokeAllPhrase {
-		redirectFlash(w, r, "/admin", "", "Type “revoke all” to confirm revoking every key.")
+		redirectFlash(w, r, "/admin?section=revoke", "", "Type “revoke all” to confirm revoking every key.")
 		return
 	}
 	n, err := s.Portal.RevokeKeys(r.Context(), sess.User, "")
 	if err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=revoke", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", fmt.Sprintf("Revoked all %d keys.", n), "")
+	redirectFlash(w, r, "/admin?section=revoke", fmt.Sprintf("Revoked all %d keys.", n), "")
 }
 
 func (s *Server) adminCheck(w http.ResponseWriter, r *http.Request, sess *Session) {
 	name := r.PostFormValue("user")
 	st, err := s.Portal.CheckPerson(r.Context(), name)
 	if err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=people", "", userMessage(r, sess, err))
 		return
 	}
 	msg := name + " is active."
 	if st.Disabled {
 		msg = fmt.Sprintf("%s is disabled (%s): their keys are suspended and they're logged out.", name, st.Reason)
 	}
-	redirectFlash(w, r, "/admin", msg, "")
+	redirectFlash(w, r, "/admin?section=people", msg, "")
 }
 
 func (s *Server) adminSync(w http.ResponseWriter, r *http.Request, sess *Session) {
 	report, err := s.Portal.SyncDirectory(r.Context())
 	if err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=people", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", fmt.Sprintf("Checked %d people against the directory: %d changed, %d disabled.", report.Checked, len(report.Changed), report.Disabled), "")
+	redirectFlash(w, r, "/admin?section=people", fmt.Sprintf("Checked %d people against the directory: %d changed, %d disabled.", report.Checked, len(report.Changed), report.Disabled), "")
 }
 
 func (s *Server) adminEndSessions(w http.ResponseWriter, r *http.Request, sess *Session) {
 	name := r.PostFormValue("user")
 	n, err := s.Portal.EndSessions(sess.User, name)
 	if err != nil {
-		redirectFlash(w, r, "/admin", "", userMessage(r, sess, err))
+		redirectFlash(w, r, "/admin?section=people", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/admin", fmt.Sprintf("Logged %s out of %d sessions.", name, n), "")
+	redirectFlash(w, r, "/admin?section=people", fmt.Sprintf("Logged %s out of %d sessions.", name, n), "")
 }
 
 // --------------------------------------------------------------------- API

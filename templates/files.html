@@ -73,9 +73,110 @@
     <div class="pane-head">
       <nav class="crumbs" aria-label="Bucket"><a href="{{browseURL .Open.Name ""}}">{{.Open.Name}}</a><span class="sep">/</span><a href="/buckets/settings?bucket={{.Open.Name}}" aria-current="page">Settings</a></nav>
     </div>
+    <div class="subsplit">
+      <nav class="subnav" aria-label="Settings">
+        <a href="/buckets/settings?bucket={{.Open.Name}}&amp;section=access"{{if eq .Section "access"}} aria-current="page"{{end}}>Group access</a>
+        <a href="/buckets/settings?bucket={{.Open.Name}}&amp;section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys</a>
+        {{if .ZFS}}<a href="/buckets/settings?bucket={{.Open.Name}}&amp;section=storage"{{if eq .Section "storage"}} aria-current="page"{{end}}>Storage and backups</a>
+        <a href="/buckets/snapshots?bucket={{.Open.Name}}">Snapshots</a>{{end}}
+        <a href="/buckets/settings?bucket={{.Open.Name}}&amp;section=delete" class="danger-link"{{if eq .Section "delete"}} aria-current="page"{{end}}>Delete bucket</a>
+      </nav>
+      <div class="subpane">
+    {{if eq .Section "keys"}}
+    <div class="card-head">
+      <h2>Access keys reaching {{.Open.Name}}</h2>
+      {{if .Open.Caps.Any}}<a class="button" href="/keys/new?bucket={{.Open.Name}}">New key for this bucket</a>{{end}}
+    </div>
+    <p class="muted small">Everyone's keys that ask for this bucket. A key never does more than its owner can do now, so a key whose owner lost access does nothing here until they get it back. Removing a key from this bucket leaves its other buckets alone.</p>
+    {{if .BucketKeys}}
+    <input type="search" class="table-filter" data-table="#bucket-keys" placeholder="Filter {{len .BucketKeys}} keys" aria-label="Filter keys">
+    <table class="keys" id="bucket-keys">
+      <thead><tr><th data-sort="text">Owner</th><th data-sort="text">Key</th><th data-sort="text">Access key ID</th><th data-sort="text">Asked for</th><th data-sort="text">Can now</th><th class="actions"></th></tr></thead>
+      <tbody>
+      {{range .BucketKeys}}
+      <tr>
+        <td>{{if eq .Owner $.User.Name}}you{{else}}{{.Owner}}{{end}}</td>
+        <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
+        <td><code>{{.Access}}</code></td>
+        <td><span class="pill {{.Asked}}">{{permLabel .Asked}}</span></td>
+        <td>{{if .Now.Any}}{{template "level" .Now}}{{else}}<span class="pill warn">nothing</span>{{end}}</td>
+        <td class="actions"><details class="menu row-menu">
+          <summary class="row-menu-button" aria-label="Actions for {{.Label}}" title="Actions"><span></span></summary>
+          <div class="pop menu-list">
+            {{if eq .Owner $.User.Name}}<a class="menu-item" href="/keys/edit?access={{.Access}}">Edit key</a>{{end}}
+            <form method="post" action="/buckets/keys/remove" data-confirm="Stop {{.Owner}}'s key {{.Label}} reaching {{$.Open.Name}}? Its other buckets are left alone.">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="access" value="{{.Access}}">
+              <button class="menu-item danger">Remove from this bucket…</button>
+            </form>
+          </div>
+        </details></td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No keys reach this bucket.</p>
+    {{end}}
+    {{else if eq .Section "storage"}}
+    {{with .Storage}}
+    <h2>Storage and backups</h2>
+    <dl class="storage">
+      <dt>Size</dt><dd>{{humanSize .Info.Referenced}}{{if .Info.RefQuota}} of {{humanSize .Info.RefQuota}}{{end}}{{if .Info.UsedBySnapshots}} <span class="muted small">(+ {{humanSize .Info.UsedBySnapshots}} held by snapshots)</span>{{end}}</dd>
+      <dt>Free</dt><dd>{{humanSize .Info.Available}}</dd>
+      <dt>Size limit</dt><dd>
+        {{if $.User.Admin}}
+        <form method="post" action="/buckets/quota" class="row compact">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+          <input name="quota" value="{{if .Info.RefQuota}}{{humanSize .Info.RefQuota}}{{else}}0{{end}}" aria-label="Size limit, e.g. 500G or 0 for none" placeholder="e.g. 500G, or 0">
+          <button class="ghost small">Set</button>
+        </form>
+        {{else}}{{if .Info.RefQuota}}{{humanSize .Info.RefQuota}}{{else}}none{{end}}{{end}}
+      </dd>
+      <dt>Backups</dt><dd>
+        {{if $.User.Admin}}
+        <form method="post" action="/buckets/backup" class="row compact">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+          <input type="hidden" name="include" value="{{if .Info.Backup}}off{{else}}on{{end}}">
+          <span>{{if .Info.Backup}}<span class="pill ok">included</span>{{else}}<span class="pill">not backed up</span>{{end}}</span>
+          <button class="ghost small">{{if .Info.Backup}}Stop backing up{{else}}Back this up{{end}}</button>
+        </form>
+        {{else}}{{if .Info.Backup}}<span class="pill ok">included</span>{{else}}<span class="pill">not backed up</span>{{end}}{{end}}
+      </dd>
+      <dt>Snapshots</dt><dd>
+        <form method="post" action="/buckets/schedule" class="row compact">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
+          <select name="every" aria-label="How often">
+            <option value="off"{{if not .Schedule.Every}} selected{{end}}>never</option>
+            <option value="hourly"{{if eq .Schedule.Every "hourly"}} selected{{end}}>hourly</option>
+            <option value="daily"{{if eq .Schedule.Every "daily"}} selected{{end}}>daily</option>
+            <option value="weekly"{{if eq .Schedule.Every "weekly"}} selected{{end}}>weekly</option>
+          </select>
+          <label class="inline-label">keep <input name="keep" type="number" min="1" max="1000" value="{{if .Schedule.Keep}}{{.Schedule.Keep}}{{else}}7{{end}}" aria-label="How many to keep"></label>
+          <button class="ghost small">Save</button>
+          <a class="button ghost small" href="/buckets/snapshots?bucket={{$.Open.Name}}">{{len .Snapshots}} snapshots</a>
+        </form>
+      </dd>
+    </dl>
+    {{end}}
+
+    {{else if eq .Section "delete"}}
+    <section class="danger-zone">
+      <h2>Delete bucket</h2>
+      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.{{if .ZFS}} It goes to the trash with its snapshots, where an admin can restore or purge it.{{end}}</p>
+      <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.Open.Name}}? It has to be empty.">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input type="hidden" name="name" value="{{.Open.Name}}">
+        <button class="danger">Delete {{.Open.Name}}</button>
+      </form>
+    </section>
+
+    {{else}}
+    <h2>Group access</h2>
     <p class="muted">Owned by <strong>{{if .Open.Owner}}{{.Open.Owner}}{{else}}nobody{{end}}</strong>. The owner always has read &amp; write. Groups below give their members access: they see the bucket under “Shared with you”, can use the file browser, and can make keys up to their level.</p>
 
-    <h2>Group access</h2>
     {{if .Grantees}}
     <table class="grantees">
       <thead><tr><th>Group</th><th>Level</th><th></th></tr></thead>
@@ -127,59 +228,9 @@
       <dt>Write only</dt><dd>Upload (a drop box): can't list, download or delete.</dd>
     </dl>
 
-    {{with .Storage}}
-    <h2>Storage</h2>
-    <dl class="storage">
-      <dt>Size</dt><dd>{{humanSize .Info.Referenced}}{{if .Info.RefQuota}} of {{humanSize .Info.RefQuota}}{{end}}{{if .Info.UsedBySnapshots}} <span class="muted small">(+ {{humanSize .Info.UsedBySnapshots}} held by snapshots)</span>{{end}}</dd>
-      <dt>Free</dt><dd>{{humanSize .Info.Available}}</dd>
-      <dt>Size limit</dt><dd>
-        {{if $.User.Admin}}
-        <form method="post" action="/buckets/quota" class="row compact">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
-          <input name="quota" value="{{if .Info.RefQuota}}{{humanSize .Info.RefQuota}}{{else}}0{{end}}" aria-label="Size limit, e.g. 500G or 0 for none" placeholder="e.g. 500G, or 0">
-          <button class="ghost small">Set</button>
-        </form>
-        {{else}}{{if .Info.RefQuota}}{{humanSize .Info.RefQuota}}{{else}}none{{end}}{{end}}
-      </dd>
-      <dt>Backups</dt><dd>
-        {{if $.User.Admin}}
-        <form method="post" action="/buckets/backup" class="row compact">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
-          <input type="hidden" name="include" value="{{if .Info.Backup}}off{{else}}on{{end}}">
-          <span>{{if .Info.Backup}}<span class="pill ok">included</span>{{else}}<span class="pill">not backed up</span>{{end}}</span>
-          <button class="ghost small">{{if .Info.Backup}}Stop backing up{{else}}Back this up{{end}}</button>
-        </form>
-        {{else}}{{if .Info.Backup}}<span class="pill ok">included</span>{{else}}<span class="pill">not backed up</span>{{end}}{{end}}
-      </dd>
-      <dt>Snapshots</dt><dd>
-        <form method="post" action="/buckets/schedule" class="row compact">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="bucket" value="{{$.Open.Name}}">
-          <select name="every" aria-label="How often">
-            <option value="off"{{if not .Schedule.Every}} selected{{end}}>never</option>
-            <option value="hourly"{{if eq .Schedule.Every "hourly"}} selected{{end}}>hourly</option>
-            <option value="daily"{{if eq .Schedule.Every "daily"}} selected{{end}}>daily</option>
-            <option value="weekly"{{if eq .Schedule.Every "weekly"}} selected{{end}}>weekly</option>
-          </select>
-          <label class="inline-label">keep <input name="keep" type="number" min="1" max="1000" value="{{if .Schedule.Keep}}{{.Schedule.Keep}}{{else}}7{{end}}" aria-label="How many to keep"></label>
-          <button class="ghost small">Save</button>
-          <a class="button ghost small" href="/buckets/snapshots?bucket={{$.Open.Name}}">{{len .Snapshots}} snapshots</a>
-        </form>
-      </dd>
-    </dl>
     {{end}}
-
-    <section class="danger-zone">
-      <h2>Delete bucket</h2>
-      <p class="muted">Only an empty bucket can be deleted. Keys keep working on their other buckets.{{if .ZFS}} It goes to the trash with its snapshots, where an admin can restore or purge it.{{end}}</p>
-      <form method="post" action="/buckets/delete" data-confirm="Delete the bucket {{.Open.Name}}? It has to be empty.">
-        <input type="hidden" name="csrf" value="{{.CSRF}}">
-        <input type="hidden" name="name" value="{{.Open.Name}}">
-        <button class="danger">Delete {{.Open.Name}}</button>
-      </form>
-    </section>
+      </div>
+    </div>
 
     {{else if .Snapshots}}
     <div class="pane-head">

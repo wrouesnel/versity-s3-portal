@@ -1,143 +1,192 @@
 {{template "header" .}}
-<section class="card">
-  <div class="card-head">
-    <h1>People</h1>
-    {{if .Directory}}
-    <form method="post" action="/admin/sync">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <button class="ghost">Check everyone now</button>
-    </form>
-    {{end}}
-  </div>
-  <p class="muted">Everyone who has logged in. {{if .Directory}}The directory is checked every few minutes: people who are disabled, locked, expired or out of the allowed group are logged out, and their keys and file access are suspended until they're back.{{else}}There's no LDAP directory to check people against.{{end}}</p>
-  {{if .People}}
-  <table class="people">
-    <thead><tr><th>Name</th><th>Status</th><th>Groups</th><th class="num">Keys</th><th></th></tr></thead>
-    <tbody>
-    {{range .People}}
-    <tr>
-      <td><strong>{{.User}}</strong>{{if .Admin}} <span class="pill readwrite">admin</span>{{end}}<div class="muted small">{{.Source}}, checked {{.Checked.Local.Format "2 Jan 15:04"}}</div></td>
-      <td>{{if .Disabled}}<span class="pill warn">suspended</span><div class="muted small">{{.Reason}}</div>{{else}}<span class="pill ok">active</span>{{end}}</td>
-      <td class="small">{{join .Groups ", "}}</td>
-      <td class="num">{{.Keys}}</td>
-      <td class="actions">
-        {{if and $.Directory (eq .Source "ldap")}}
-        <form method="post" action="/admin/check">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="user" value="{{.User}}">
-          <button class="ghost small">Check</button>
-        </form>
-        {{end}}
-        <form method="post" action="/admin/end-sessions" data-confirm="Log {{.User}} out everywhere?">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="user" value="{{.User}}">
-          <button class="ghost small">Log out</button>
-        </form>
-        {{if .Keys}}
-        <form method="post" action="/admin/revoke-user" data-confirm="Revoke all of {{.User}}'s keys for good?">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="owner" value="{{.User}}">
-          <button class="ghost danger small">Revoke keys</button>
-        </form>
-        {{end}}
-      </td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <p class="empty">Nobody has logged in yet.</p>
-  {{end}}
-</section>
+<div class="split">
+  <aside class="sidebar" id="sidebar" aria-label="Admin sections">
+    <nav class="bucket-nav section-nav">
+      <h2>Admin</h2>
+      <ul>
+        <li><a class="section" href="/admin?section=people"{{if eq .Section "people"}} aria-current="page"{{end}}>People <span class="count">{{len .People}}</span></a></li>
+        <li><a class="section" href="/admin?section=buckets"{{if eq .Section "buckets"}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
+        <li><a class="section" href="/admin?section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys <span class="count">{{len .AllKeys}}</span></a></li>
+        {{if .ZFS}}<li><a class="section" href="/admin?section=trash"{{if eq .Section "trash"}} aria-current="page"{{end}}>Deleted buckets <span class="count">{{len .Trash}}</span></a></li>{{end}}
+      </ul>
+      <h2>Emergencies</h2>
+      <ul>
+        <li><a class="section danger-link" href="/admin?section=revoke"{{if eq .Section "revoke"}} aria-current="page"{{end}}>Revoke every key</a></li>
+      </ul>
+    </nav>
+  </aside>
+  <div class="side-resize" role="separator" aria-orientation="vertical" aria-controls="sidebar" aria-label="Resize the section list" tabindex="0" title="Drag to resize; double-click to reset"></div>
+  <div class="side-backdrop" aria-hidden="true"></div>
 
-<section class="card">
-  <h1>Buckets</h1>
-  {{if .AllBuckets}}
-  <table class="buckets">
-    <thead><tr><th>Bucket</th><th>Owner</th><th>Groups</th><th></th></tr></thead>
-    <tbody>
-    {{range .AllBuckets}}
-    <tr>
-      <td><code>{{.Name}}</code></td>
-      <td>{{if .Owner}}{{.Owner}}{{else}}<span class="muted">none</span>{{end}}</td>
-      <td>{{if .Groups}}{{template "perms" .Groups}}{{else}}<span class="muted">owner only</span>{{end}}</td>
-      <td class="actions"><a class="button ghost small" href="/buckets/settings?bucket={{.Name}}">Settings</a></td>
-    </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <p class="empty">No buckets.</p>
-  {{end}}
-</section>
+  <section class="pane" id="pane">
+    <div id="flash">
+    {{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
+    {{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
+    </div>
 
-{{if .Trash}}
-<section class="card">
-  <h1>Deleted buckets</h1>
-  <p class="muted">Deleted buckets keep their data and snapshots here, out of reach, until purged. Purging also destroys the host's own snapshots of them.</p>
-  <table class="trash">
-    <thead><tr><th>Bucket</th><th>Deleted</th><th class="num">Holds</th><th>Snapshots</th><th></th></tr></thead>
-    <tbody>
-    {{range .Trash}}
-    <tr>
-      <td><code>{{.Bucket}}</code></td>
-      <td>{{.Trashed.Local.Format "2 Jan 2006 15:04"}}</td>
-      <td class="num">{{humanSize .Used}}</td>
-      <td class="small">{{.PortalSnapshots}} portal, {{.OtherSnapshots}} host</td>
-      <td class="actions">
-        <form method="post" action="/admin/trash/restore" data-confirm="Restore {{.Bucket}}? Its groups and keys need access given again.">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="entry" value="{{.Entry}}">
-          <button class="ghost small">Restore</button>
-        </form>
-        <form method="post" action="/admin/trash/purge" data-confirm="Destroy {{.Bucket}} for good, with all {{.PortalSnapshots}} portal and {{.OtherSnapshots}} host snapshots? This can't be undone.">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="entry" value="{{.Entry}}">
-          <button class="ghost danger small">Purge</button>
-        </form>
-      </td>
-    </tr>
+    {{if eq .Section "buckets"}}
+    <div class="pane-head"><h1>Buckets</h1></div>
+    {{if .AllBuckets}}
+    <input type="search" class="table-filter" data-table="#admin-buckets" placeholder="Filter {{len .AllBuckets}} buckets" aria-label="Filter buckets">
+    <table class="files" id="admin-buckets">
+      <thead><tr><th data-sort="text" aria-sort="ascending">Bucket</th>{{if .Sizes}}<th class="num" data-sort="num">Size</th><th class="num" data-sort="num">Quota</th>{{end}}<th data-sort="text">Owner</th><th data-sort="text">Groups</th><th class="actions"></th></tr></thead>
+      <tbody>
+      {{range .AllBuckets}}
+      <tr>
+        <td><a class="bucket" href="/buckets/settings?bucket={{.Name}}">{{.Name}}</a></td>
+        {{if $.Sizes}}{{with size $.Sizes .Name}}<td class="num" data-v="{{.Referenced}}">{{if .Bucket}}{{humanSize .Referenced}}{{else}}<span class="muted">—</span>{{end}}</td><td class="num muted" data-v="{{.RefQuota}}">{{if .RefQuota}}{{humanSize .RefQuota}} <span class="small">({{pct .Referenced .RefQuota}}%)</span>{{else}}none{{end}}</td>{{end}}{{end}}
+        <td>{{if .Owner}}{{.Owner}}{{else}}<span class="muted">none</span>{{end}}</td>
+        <td>{{if .Groups}}{{range $g, $p := .Groups}}<span class="grant">{{$g}} <span class="pill {{$p}}">{{permLabel $p}}</span></span> {{end}}{{else}}<span class="muted">owner only</span>{{end}}</td>
+        <td class="actions"><details class="menu row-menu">
+          <summary class="button ghost small actions-button">Actions</summary>
+          <div class="pop menu-list">
+            <a class="menu-item" href="/buckets/settings?bucket={{.Name}}">Group access</a>
+            <a class="menu-item" href="/buckets/settings?bucket={{.Name}}&amp;section=keys">Access keys</a>
+            {{if $.ZFS}}<a class="menu-item" href="/buckets/settings?bucket={{.Name}}&amp;section=storage">Storage and backups</a>{{end}}
+            <a class="menu-item" href="/files?bucket={{.Name}}">Browse files</a>
+          </div>
+        </details></td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No buckets.</p>
     {{end}}
-    </tbody>
-  </table>
-</section>
-{{end}}
 
-<section class="card">
-  <h1>Everyone's access keys</h1>
-  {{if .AllKeys}}
-  <table class="keys">
-    <thead><tr><th>Owner</th><th>Name</th><th>Access key ID</th><th>Buckets</th><th></th></tr></thead>
-    <tbody>
-    {{range .AllKeys}}
-    <tr>
-      <td>{{.Owner}}</td>
-      <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
-      <td><code>{{.Access}}</code></td>
-      <td>{{template "perms" .Buckets}}</td>
-      <td class="actions">
-        <form method="post" action="/admin/revoke" data-confirm="Revoke {{.Owner}}'s key {{.Label}}?">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="access" value="{{.Access}}">
-          <button class="ghost danger small">Revoke</button>
-        </form>
-      </td>
-    </tr>
+    {{else if eq .Section "keys"}}
+    <div class="pane-head"><h1>Access keys</h1></div>
+    <p class="muted small">Every key anyone has made. Each reaches only the buckets it asked for, and never more than its owner can do now.</p>
+    {{if .AllKeys}}
+    <input type="search" class="table-filter" data-table="#admin-keys" value="{{.Filter}}" placeholder="Filter {{len .AllKeys}} keys" aria-label="Filter keys">
+    <table class="keys" id="admin-keys">
+      <thead><tr><th data-sort="text">Owner</th><th data-sort="text">Name</th><th data-sort="text">Access key ID</th><th>Buckets</th><th class="actions"></th></tr></thead>
+      <tbody>
+      {{range .AllKeys}}
+      <tr>
+        <td>{{.Owner}}</td>
+        <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
+        <td><code>{{.Access}}</code></td>
+        <td>{{template "perms" .Buckets}}</td>
+        <td class="actions"><details class="menu row-menu">
+          <summary class="button ghost small actions-button">Actions</summary>
+          <div class="pop menu-list">
+            <form method="post" action="/admin/revoke" data-confirm="Revoke {{.Owner}}'s key {{.Label}}? It stops working at once.">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="access" value="{{.Access}}">
+              <button class="menu-item danger">Revoke key…</button>
+            </form>
+          </div>
+        </details></td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">Nobody has any keys.</p>
     {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <p class="empty">Nobody has any keys.</p>
-  {{end}}
-</section>
 
-{{if .AllKeys}}
-<section class="card danger-zone">
-  <h1>Revoke every key</h1>
-  <p>Every access key stops working at once, for everyone. Use it if keys may have leaked. People's buckets and files stay, and the file browser keeps working.</p>
-  <form method="post" action="/admin/revoke-all" class="row" data-confirm="Revoke every access key, for everyone?">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <input name="confirm" placeholder="type: revoke all" aria-label="Type revoke all to confirm" autocomplete="off" required>
-    <button class="danger">Revoke every key</button>
-  </form>
-</section>
-{{end}}
+    {{else if eq .Section "trash"}}
+    <div class="pane-head"><h1>Deleted buckets</h1></div>
+    <p class="muted small">Deleted buckets keep their data and snapshots here, out of reach, until purged. Purging also destroys the host's own snapshots of them.</p>
+    {{if .Trash}}
+    <table class="trash">
+      <thead><tr><th data-sort="text">Bucket</th><th data-sort="text">Deleted</th><th class="num">Holds</th><th>Snapshots</th><th class="actions"></th></tr></thead>
+      <tbody>
+      {{range .Trash}}
+      <tr>
+        <td>{{.Bucket}}</td>
+        <td class="when">{{.Trashed.Local.Format "2006-01-02 15:04"}}</td>
+        <td class="num">{{humanSize .Used}}</td>
+        <td class="small">{{.PortalSnapshots}} portal, {{.OtherSnapshots}} host</td>
+        <td class="actions"><details class="menu row-menu">
+          <summary class="button ghost small actions-button">Actions</summary>
+          <div class="pop menu-list">
+            <form method="post" action="/admin/trash/restore" data-confirm="Restore {{.Bucket}}? Its groups and keys need access given again.">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="entry" value="{{.Entry}}">
+              <button class="menu-item">Restore</button>
+            </form>
+            <form method="post" action="/admin/trash/purge" data-confirm="Destroy {{.Bucket}} for good, with all {{.PortalSnapshots}} portal and {{.OtherSnapshots}} host snapshots? This can't be undone.">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="entry" value="{{.Entry}}">
+              <button class="menu-item danger">Purge for good…</button>
+            </form>
+          </div>
+        </details></td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">Nothing in the trash.</p>
+    {{end}}
+
+    {{else if eq .Section "revoke"}}
+    <div class="pane-head"><h1>Revoke every key</h1></div>
+    <section class="danger-zone">
+      <p>Every access key stops working at once, for everyone. Use it if keys may have leaked. People's buckets and files stay, and the file browser keeps working.</p>
+      {{if .AllKeys}}
+      <form method="post" action="/admin/revoke-all" class="row" data-confirm="Revoke every access key, for everyone?">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input name="confirm" placeholder="type: revoke all" aria-label="Type revoke all to confirm" autocomplete="off" required>
+        <button class="danger">Revoke all {{len .AllKeys}} keys</button>
+      </form>
+      {{else}}<p class="muted">There are no keys to revoke.</p>{{end}}
+    </section>
+
+    {{else}}
+    <div class="pane-head">
+      <h1>People</h1>
+      {{if .Directory}}
+      <form method="post" action="/admin/sync">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button class="ghost">Check everyone now</button>
+      </form>
+      {{end}}
+    </div>
+    <p class="muted small">Everyone who has logged in. {{if .Directory}}The directory is checked every few minutes: people who are disabled, locked, expired or out of the allowed group are logged out, and their keys and file access are suspended until they're back.{{else}}There's no LDAP directory to check people against.{{end}}</p>
+    {{if .People}}
+    <input type="search" class="table-filter" data-table="#admin-people" placeholder="Filter {{len .People}} people" aria-label="Filter people">
+    <table class="people" id="admin-people">
+      <thead><tr><th data-sort="text">Name</th><th data-sort="text">Status</th><th data-sort="text">Groups</th><th class="num" data-sort="num">Keys</th><th data-sort="text">Checked</th></tr></thead>
+      <tbody>
+      {{range .People}}
+      <tr>
+        <td><div class="who-cell">
+          <span><strong>{{.User}}</strong>{{if .Admin}} <span class="pill readwrite">admin</span>{{end}} <span class="muted small">{{.Source}}</span></span>
+          <details class="menu row-menu">
+            <summary class="button ghost small actions-button" aria-label="Actions for {{.User}}">Actions</summary>
+            <div class="pop menu-list">
+              {{if and $.Directory (eq .Source "ldap")}}
+              <form method="post" action="/admin/check">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="user" value="{{.User}}">
+                <button class="menu-item">Check against the directory</button>
+              </form>
+              {{end}}
+              <form method="post" action="/admin/end-sessions" data-confirm="Log {{.User}} out everywhere?">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="user" value="{{.User}}">
+                <button class="menu-item">Log out everywhere…</button>
+              </form>
+              <a class="menu-item" href="/admin?section=keys&amp;owner={{.User}}">Their access keys</a>
+              {{if .Keys}}
+              <form method="post" action="/admin/revoke-user" data-confirm="Revoke all {{.Keys}} of {{.User}}'s keys for good?">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="owner" value="{{.User}}">
+                <button class="menu-item danger">Revoke all their keys…</button>
+              </form>
+              {{end}}
+            </div>
+          </details>
+        </div></td>
+        <td>{{if .Disabled}}<span class="pill warn">suspended</span><div class="muted small">{{.Reason}}</div>{{else}}<span class="pill ok">active</span>{{end}}</td>
+        <td class="small">{{join .Groups ", "}}</td>
+        <td class="num">{{.Keys}}</td>
+        <td class="when muted">{{.Checked.Local.Format "2 Jan 15:04"}}</td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">Nobody has logged in yet.</p>
+    {{end}}
+    {{end}}
+  </section>
+</div>
 {{template "footer" .}}

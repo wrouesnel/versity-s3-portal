@@ -13,7 +13,7 @@
 <body>
 <header class="top">
   <div class="top-inner">
-    {{if eq .Tab "files"}}<button type="button" class="hamburger" aria-controls="sidebar" aria-expanded="true" aria-label="Show or hide the bucket list" title="Bucket list"><span></span></button>{{end}}
+    {{if or (eq .Tab "files") (eq .Tab "admin")}}<button type="button" class="hamburger" aria-controls="sidebar" aria-expanded="true" aria-label="Show or hide the bucket list" title="Bucket list"><span></span></button>{{end}}
     <a class="brand" href="/">{{.Title}}</a>
     {{if .User}}
     <nav class="links" aria-label="Main">
@@ -30,8 +30,8 @@
   </div>
   <div class="loading" aria-hidden="true"></div>
 </header>
-<main{{if eq .Tab "files"}} class="wide"{{end}}>
-{{if ne .Tab "files"}}<div id="flash">
+<main{{if or (eq .Tab "files") (eq .Tab "admin")}} class="wide"{{end}}>
+{{if and (ne .Tab "files") (ne .Tab "admin")}}<div id="flash">
 {{if .Error}}<p class="flash error" role="alert">{{.Error}}</p>{{end}}
 {{if .Notice}}<p class="flash notice" role="status">{{.Notice}}</p>{{end}}
 </div>{{end}}

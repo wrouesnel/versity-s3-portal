@@ -319,6 +319,19 @@ document.addEventListener("click", (ev) => {
   body.append(...rows);
 });
 
+// A search box with data-table filters that table's rows by their text.
+document.addEventListener("input", (ev) => {
+  const input = ev.target.closest && ev.target.closest("input.table-filter");
+  if (!input) return;
+  const table = document.querySelector(input.dataset.table);
+  if (!table) return;
+  const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+  for (const tr of table.tBodies[0].rows) {
+    const text = tr.textContent.toLowerCase();
+    tr.hidden = !words.every((w) => text.includes(w));
+  }
+});
+
 // placeCurrentBucket scrolls the sidebar to the open bucket on a fresh load.
 function placeCurrentBucket() {
   const side = document.querySelector(".sidebar");
@@ -444,6 +457,7 @@ document.addEventListener("keydown", (ev) => {
 
 function enhance() {
   addCopyButtons();
+  for (const f of document.querySelectorAll("input.table-filter")) if (f.value) f.dispatchEvent(new Event("input", { bubbles: true }));
   syncSelection();
   filterBuckets();
   placeCurrentBucket();

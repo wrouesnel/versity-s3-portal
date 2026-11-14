@@ -256,3 +256,82 @@ func (p *Portal) DeleteSelection(ctx context.Context, u User, sel Selection) (in
 	}
 	return deleted, nil
 }
+
+// BucketKey is a key that asks for access to one bucket: what it asked
+// for, and what it can do there now, which is less when its owner has
+// lost access.
+type BucketKey struct {
+	KeyEntry
+	Asked Perm
+	Now   Caps
+}
+
+// BucketKeys lists everyone's keys that ask for access to bucket, for
+// people who manage it.
+func (p *Portal) BucketKeys(ctx context.Context, u User, bucket string) ([]BucketKey, error) {
+	v, err := p.Bucket(ctx, u, bucket, false)
+	if err != nil {
+		return nil, err
+	}
+	if !v.Manage {
+		return nil, userErr("Only %s's owner can see its keys.", bucket)
+	}
+	var ownerAcct string
+	all, err := p.listBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range all {
+		if b.Name == bucket {
+			ownerAcct = b.Owner
+		}
+	}
+	meta := p.store.BucketMeta(bucket)
+	var out []BucketKey
+	for _, e := range p.store.Entries() {
+		perm, ok := e.Buckets[bucket]
+		if !ok {
+			continue
+		}
+		person, _ := p.store.Person(e.Owner)
+		c, _ := access(e.Owner, person, ownerAcct, meta)
+		out = append(out, BucketKey{KeyEntry: e, Asked: perm, Now: perm.Caps().Intersect(c)})
+	}
+	return out, nil
+}
+
+// RemoveKeyFromBucket takes one bucket out of a key's grants, leaving
+// the key and its other buckets alone. The bucket's owner may do it to
+// anyone's key, so that sharing can be undone key by key.
+func (p *Portal) RemoveKeyFromBucket(ctx context.Context, u User, access, bucket string) error {
+	v, err := p.Bucket(ctx, u, bucket, true)
+	if err != nil {
+		return err
+	}
+	if !v.Manage {
+		return userErr("Only %s's owner can change which keys reach it.", bucket)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k, ok := p.store.Get(access)
+	if !ok {
+		return userErr("No such key.")
+	}
+	if _, ok := k.Buckets[bucket]; !ok {
+		return nil
+	}
+	grants := map[string]Perm{}
+	for b, perm := range k.Buckets {
+		if b != bucket {
+			grants[b] = perm
+		}
+	}
+	if err := p.store.Put(access, &Key{Owner: k.Owner, Label: k.Label, Created: k.Created, Buckets: grants}); err != nil {
+		return err
+	}
+	if err := p.syncBuckets(ctx, []string{bucket}); err != nil {
+		return err
+	}
+	slog.Info("removed key from bucket", "user", u.Name, "access", access, "owner", k.Owner, "bucket", bucket)
+	return nil
+}

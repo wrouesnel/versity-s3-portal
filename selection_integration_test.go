@@ -122,3 +122,45 @@ func TestSelectionAgainstGateway(t *testing.T) {
 		t.Fatalf("after delete: %+v", list)
 	}
 }
+
+// A bucket's owner sees every key that reaches it and can take the bucket
+// out of any of them, without touching the keys' other buckets.
+func TestBucketKeysAgainstGateway(t *testing.T) {
+	ctx := context.Background()
+	root := testGateway(t)
+	store, _ := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	p := NewPortal(root, store)
+	ok(t, "reconcile", p.Reconcile(ctx))
+	suffix := strings.ToLower(newAccessKey()[3:9])
+	alice := User{Name: "alice" + suffix, UID: 1001, GID: 1001}
+	bob := User{Name: "bob" + suffix, UID: 1002, GID: 1002}
+	enroll(t, p, alice)
+	enroll(t, p, bob, "team"+suffix)
+	shared, bobs := "shared-"+suffix, "bobs-"+suffix
+	ok(t, "create shared", p.CreateBucket(ctx, alice, shared))
+	ok(t, "create bobs", p.CreateBucket(ctx, bob, bobs))
+	ok(t, "grant", p.SetGroupGrant(ctx, alice, shared, "team"+suffix, PermRead))
+	bobKey, bobSecret, err := p.CreateKey(ctx, bob, "bob's", map[string]Perm{shared: PermRead, bobs: PermReadWrite})
+	ok(t, "bob's key", err)
+
+	keys, err := p.BucketKeys(ctx, alice, shared)
+	ok(t, "alice lists keys", err)
+	if len(keys) != 1 || keys[0].Access != bobKey || keys[0].Asked != PermRead || !keys[0].Now.Read {
+		t.Fatalf("keys reaching shared: %+v", keys)
+	}
+	if _, err := p.BucketKeys(ctx, bob, shared); err == nil {
+		t.Fatal("bob, who doesn't own it, listed shared's keys")
+	}
+	if err := p.RemoveKeyFromBucket(ctx, bob, bobKey, shared); err == nil {
+		t.Fatal("bob changed shared's keys")
+	}
+
+	ok(t, "alice removes bob's key", p.RemoveKeyFromBucket(ctx, alice, bobKey, shared))
+	k, _ := p.store.Get(bobKey)
+	if _, still := k.Buckets[shared]; still || k.Buckets[bobs] != PermReadWrite {
+		t.Fatalf("bob's key after removal: %+v", k.Buckets)
+	}
+	bk := as(root, bobKey, bobSecret)
+	denied(t, "bob's key on shared", listObjects(ctx, bk, shared))
+	ok(t, "bob's key on his own bucket", putObject(ctx, bk, bobs, "x", "x"))
+}
