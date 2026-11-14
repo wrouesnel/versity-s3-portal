@@ -171,18 +171,25 @@ document.addEventListener("touchstart", (ev) => {
 
 document.addEventListener("submit", (ev) => {
   const form = ev.target;
-  const msg = form.dataset.confirm;
+  const sub = ev.submitter;
+  let msg = form.dataset.confirm;
+  if (sub && sub.hasAttribute("data-confirm-selection")) msg = selectionQuestion();
   if (msg && !window.confirm(msg)) {
     ev.preventDefault();
     return;
   }
-  if (form.hasAttribute("data-full") || form.method.toLowerCase() !== "post") return;
+  // Downloads are plain posts: the browser saves the response.
+  const action = sub && sub.hasAttribute("formaction") ? sub.formAction : form.action;
+  if ((form.hasAttribute("data-full") && !(sub && sub.hasAttribute("formaction"))) || form.method.toLowerCase() !== "post") {
+    for (const d of document.querySelectorAll("details.menu[open]")) d.open = false;
+    return;
+  }
   ev.preventDefault();
   const body = new URLSearchParams(new FormData(form, ev.submitter));
   const buttons = Array.from(form.querySelectorAll("button"));
   for (const b of buttons) b.disabled = true;
   // Actions on this page come back to it: keep the reader's place.
-  navigate(form.action, { method: "POST", body, keepScroll: true })
+  navigate(action, { method: "POST", body, keepScroll: true })
     .finally(() => { for (const b of buttons) b.disabled = false; });
 });
 
@@ -413,6 +420,7 @@ document.addEventListener("keydown", (ev) => {
 
 function enhance() {
   addCopyButtons();
+  syncSelection();
   filterBuckets();
   placeCurrentBucket();
   syncHamburger();
@@ -422,6 +430,15 @@ function enhance() {
 document.addEventListener("change", (ev) => {
   const form = ev.target.closest && ev.target.closest("form.autosubmit");
   if (form && ev.target.tagName === "SELECT") form.requestSubmit();
+});
+
+// Esc closes an open menu, and puts focus back on its button.
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  for (const d of document.querySelectorAll("details.menu[open]")) {
+    d.open = false;
+    d.querySelector("summary").focus();
+  }
 });
 
 // Close an open menu when clicking elsewhere.
@@ -509,6 +526,166 @@ async function upload(box, items) {
   if (failed === 0) {
     navigate(location.href, { push: false, keepScroll: true });
   }
+}
+
+// ---------------------------------------------------------------- selection
+
+// Ticking files in the table shows the bar of things to do with them.
+// Shift-click ticks a run of rows.
+let lastTicked = null;
+
+function selected() {
+  return [...document.querySelectorAll('table.selectable tbody input[type=checkbox]')].filter((c) => c.checked);
+}
+
+function syncSelection() {
+  const bar = document.getElementById("sel");
+  if (!bar) return;
+  const boxes = [...document.querySelectorAll("table.selectable tbody input[type=checkbox]")];
+  const picked = boxes.filter((c) => c.checked);
+  for (const c of boxes) c.closest("tr").classList.toggle("selected", c.checked);
+  const all = document.querySelector("table.selectable .sel-all");
+  if (all) {
+    all.checked = picked.length > 0 && picked.length === boxes.length;
+    all.indeterminate = picked.length > 0 && picked.length < boxes.length;
+  }
+  bar.classList.toggle("active", picked.length > 0);
+  const count = bar.querySelector(".selcount");
+  if (!count.dataset.idle) count.dataset.idle = count.textContent;
+  const folders = picked.filter((c) => c.name === "folder").length;
+  const files = picked.length - folders;
+  const parts = [];
+  if (files) parts.push(`${files} file${files === 1 ? "" : "s"}`);
+  if (folders) parts.push(`${folders} folder${folders === 1 ? "" : "s"}`);
+  count.textContent = picked.length ? parts.join(" and ") + " selected" : count.dataset.idle;
+}
+
+function selectionQuestion() {
+  const picked = selected();
+  const folders = picked.filter((c) => c.name === "folder").length;
+  const files = picked.length - folders;
+  if (picked.length === 1) {
+    const name = picked[0].closest("tr").querySelector("td:nth-child(2)").textContent.trim();
+    return folders ? `Delete the folder ${name} and everything in it?` : `Delete ${name}?`;
+  }
+  const parts = [];
+  if (files) parts.push(`${files} file${files === 1 ? "" : "s"}`);
+  if (folders) parts.push(`${folders} folder${folders === 1 ? "" : "s"} and everything in ${folders === 1 ? "it" : "them"}`);
+  return `Delete ${parts.join(" and ")}?`;
+}
+
+document.addEventListener("click", (ev) => {
+  const box = ev.target.closest && ev.target.closest("table.selectable tbody input[type=checkbox]");
+  if (box) {
+    const boxes = [...document.querySelectorAll("table.selectable tbody input[type=checkbox]")];
+    if (ev.shiftKey && lastTicked && boxes.includes(lastTicked)) {
+      const [a, b] = [boxes.indexOf(lastTicked), boxes.indexOf(box)].sort((x, y) => x - y);
+      for (let i = a; i <= b; i++) boxes[i].checked = box.checked;
+    }
+    lastTicked = box;
+    syncSelection();
+    return;
+  }
+  if (ev.target.closest && ev.target.closest(".sel-all")) {
+    const on = ev.target.checked;
+    for (const c of document.querySelectorAll("table.selectable tbody input[type=checkbox]")) c.checked = on;
+    syncSelection();
+    return;
+  }
+  if (ev.target.closest && ev.target.closest(".sel-clear")) {
+    for (const c of selected()) c.checked = false;
+    syncSelection();
+    return;
+  }
+  const dl = ev.target.closest && ev.target.closest(".dl-files");
+  if (dl) downloadFiles(dl.closest("form"));
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && selected().length && !ev.target.closest("input[type=search], input[type=text]") && !document.querySelector("details.menu[open]")) {
+    for (const c of selected()) c.checked = false;
+    syncSelection();
+  }
+});
+
+// downloadFiles saves the selection as separate files. A few plain files
+// are just downloaded; folders, or many files, go into a folder picked on
+// this computer where the browser allows it.
+async function downloadFiles(form) {
+  const picked = selected();
+  const folders = picked.filter((c) => c.name === "folder");
+  const keys = picked.filter((c) => c.name === "key").map((c) => c.value);
+  const data = new FormData(form);
+  const bucket = data.get("bucket"), snap = data.get("snap"), prefix = data.get("prefix");
+  const fileURL = (key) => "/download?" + new URLSearchParams(snap ? { bucket, snap, key } : { bucket, key });
+  const status = ensureStatus(form);
+  if (!folders.length && keys.length <= 10) {
+    // Browsers may ask once whether this site may download several files.
+    for (const key of keys) {
+      const a = document.createElement("a");
+      a.href = fileURL(key);
+      a.download = "";
+      document.body.append(a);
+      a.click();
+      a.remove();
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    return;
+  }
+  if (!window.showDirectoryPicker) {
+    status.textContent = folders.length
+      ? "This browser can't save folders as they are: download them as a .zip or .tar instead."
+      : "That's a lot of separate downloads: download them as a .zip or .tar instead.";
+    return;
+  }
+  let dir;
+  try {
+    dir = await window.showDirectoryPicker({ mode: "readwrite", id: "s3-downloads" });
+  } catch {
+    return; // cancelled
+  }
+  const body = new URLSearchParams(data);
+  for (const c of picked) body.append(c.name, c.value);
+  status.textContent = "Finding the files…";
+  const res = await fetch("/selection/list", { method: "POST", body });
+  if (!res.ok) {
+    status.textContent = (await res.text()).trim() || "Couldn't list the files.";
+    return;
+  }
+  const files = await res.json();
+  let done = 0, failed = 0;
+  busyUploads++;
+  try {
+    for (const f of files) {
+      status.textContent = `Saving ${done + 1} of ${files.length}: ${f.key.slice(prefix.length)}`;
+      try {
+        const parts = f.key.slice(prefix.length).split("/");
+        let d = dir;
+        for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p, { create: true });
+        const r = await fetch(fileURL(f.key));
+        if (!r.ok) throw new Error(r.statusText);
+        const out = await (await d.getFileHandle(parts.at(-1), { create: true })).createWritable();
+        await r.body.pipeTo(out);
+        done++;
+      } catch {
+        failed++;
+      }
+    }
+  } finally {
+    busyUploads--;
+  }
+  status.textContent = `Saved ${done} file${done === 1 ? "" : "s"} to ${dir.name}` + (failed ? `; ${failed} failed.` : ".");
+}
+
+function ensureStatus(form) {
+  let s = form.querySelector(".sel-status");
+  if (!s) {
+    s = document.createElement("span");
+    s.className = "sel-status small muted";
+    s.setAttribute("aria-live", "polite");
+    form.append(s);
+  }
+  return s;
 }
 
 // ---------------------------------------------------------------- archives

@@ -237,32 +237,43 @@
     <p class="flash warning snapshot-banner">You're looking at <strong>{{.Open.Name}}</strong> as it was in snapshot <code>{{.Snap}}</code>. It's read only{{if $rw}}: restoring copies files back over the live bucket{{end}}.</p>
     {{if .Listing}}
     {{if or .Listing.Prefixes .Listing.Objects}}
-    <table class="files">
-      <thead><tr><th>Name</th><th class="num">Size</th><th class="when">Modified</th><th></th></tr></thead>
+    {{template "selbar" (selbar . false)}}
+    <table class="files selectable">
+      <thead><tr><th class="sel"><input type="checkbox" class="sel-all" aria-label="Select all"></th><th>Name</th><th class="num">Size</th><th class="when">Modified</th><th class="actions"></th></tr></thead>
       <tbody>
       {{range .Listing.Prefixes}}
       <tr>
+        <td class="sel"><input type="checkbox" form="sel" name="folder" value="{{.}}" aria-label="Select {{folderName $.Prefix .}}"></td>
         <td><a class="folder" href="{{snapURL $.Open.Name $.Snap .}}">{{folderName $.Prefix .}}</a></td>
         <td class="num muted">—</td><td class="when"></td>
-        <td class="actions">{{if $rw}}
-          <form method="post" action="/restore" data-confirm="Restore the folder {{folderName $.Prefix .}} from this snapshot, replacing the files there now?">
-            <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="snap" value="{{$.Snap}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="folder" value="{{.}}">
-            <button class="ghost small">Restore</button>
-          </form>{{end}}
-        </td>
+        <td class="actions"><details class="menu row-menu">
+          <summary class="row-menu-button" aria-label="Actions for {{folderName $.Prefix .}}" title="Actions"><span></span></summary>
+          <div class="pop menu-list">
+            {{template "archiveitems" (rowsel $ . true)}}
+            {{if $rw}}<form method="post" action="/restore" data-confirm="Restore the folder {{folderName $.Prefix .}} from this snapshot, replacing the files there now?">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="snap" value="{{$.Snap}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="folder" value="{{.}}">
+              <button class="menu-item">Restore over the live folder</button>
+            </form>{{end}}
+          </div>
+        </details></td>
       </tr>
       {{end}}
       {{range .Listing.Objects}}
       <tr>
+        <td class="sel"><input type="checkbox" form="sel" name="key" value="{{.Key}}" aria-label="Select {{within $.Prefix .Key}}"></td>
         <td><a class="file" href="/download?bucket={{$.Open.Name}}&amp;snap={{$.Snap}}&amp;key={{.Key}}" download>{{within $.Prefix .Key}}</a></td>
         <td class="num">{{humanSize .Size}}</td>
         <td class="when muted">{{.LastModified.Local.Format "2 Jan 2006 15:04"}}</td>
-        <td class="actions">{{if $rw}}
-          <form method="post" action="/restore" data-confirm="Restore {{within $.Prefix .Key}} from this snapshot, replacing the file there now?">
-            <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="snap" value="{{$.Snap}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="key" value="{{.Key}}">
-            <button class="ghost small">Restore</button>
-          </form>{{end}}
-        </td>
+        <td class="actions"><details class="menu row-menu">
+          <summary class="row-menu-button" aria-label="Actions for {{within $.Prefix .Key}}" title="Actions"><span></span></summary>
+          <div class="pop menu-list">
+            <a class="menu-item" href="/download?bucket={{$.Open.Name}}&amp;snap={{$.Snap}}&amp;key={{.Key}}" download>Download</a>
+            {{if $rw}}<form method="post" action="/restore" data-confirm="Restore {{within $.Prefix .Key}} from this snapshot, replacing the file there now?">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="snap" value="{{$.Snap}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="key" value="{{.Key}}">
+              <button class="menu-item">Restore over the live file</button>
+            </form>{{end}}
+          </div>
+        </details></td>
       </tr>
       {{end}}
       </tbody>
@@ -323,43 +334,44 @@
       <p class="empty">This bucket is a drop box for you: upload files here, but you can't see what's in it.</p>
       {{else if .Listing}}
       {{if or .Listing.Prefixes .Listing.Objects}}
-      <table class="files">
-        <thead><tr><th>Name</th><th class="num">Size</th><th class="when">Modified</th><th></th></tr></thead>
+      {{template "selbar" (selbar . $caps.Delete)}}
+      <table class="files selectable">
+        <thead><tr><th class="sel"><input type="checkbox" class="sel-all" aria-label="Select all"></th><th>Name</th><th class="num">Size</th><th class="when">Modified</th><th class="actions"></th></tr></thead>
         <tbody>
         {{range .Listing.Prefixes}}
         <tr>
+          <td class="sel"><input type="checkbox" form="sel" name="folder" value="{{.}}" aria-label="Select {{folderName $.Prefix .}}"></td>
           <td><a class="folder" href="{{browseURL $.Open.Name .}}">{{folderName $.Prefix .}}</a></td>
           <td class="num muted">—</td>
           <td class="when"></td>
-          <td class="actions">
-            {{if $caps.Delete}}
-            <form method="post" action="/folders/delete" data-confirm="Delete the folder {{folderName $.Prefix .}} and everything in it?">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="bucket" value="{{$.Open.Name}}">
-              <input type="hidden" name="prefix" value="{{$.Prefix}}">
-              <input type="hidden" name="folder" value="{{.}}">
-              <button class="ghost danger small">Delete</button>
-            </form>
-            {{end}}
-          </td>
+          <td class="actions"><details class="menu row-menu">
+            <summary class="row-menu-button" aria-label="Actions for {{folderName $.Prefix .}}" title="Actions"><span></span></summary>
+            <div class="pop menu-list">
+              {{template "archiveitems" (rowsel $ . true)}}
+              {{if $caps.Delete}}<form method="post" action="/folders/delete" data-confirm="Delete the folder {{folderName $.Prefix .}} and everything in it?">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="folder" value="{{.}}">
+                <button class="menu-item danger">Delete…</button>
+              </form>{{end}}
+            </div>
+          </details></td>
         </tr>
         {{end}}
         {{range .Listing.Objects}}
         <tr>
+          <td class="sel"><input type="checkbox" form="sel" name="key" value="{{.Key}}" aria-label="Select {{within $.Prefix .Key}}"></td>
           <td><a class="file" href="/download?bucket={{$.Open.Name}}&amp;key={{.Key}}" download>{{within $.Prefix .Key}}</a></td>
           <td class="num">{{humanSize .Size}}</td>
           <td class="when muted">{{.LastModified.Local.Format "2 Jan 2006 15:04"}}</td>
-          <td class="actions">
-            {{if $caps.Delete}}
-            <form method="post" action="/objects/delete" data-confirm="Delete {{within $.Prefix .Key}}?">
-              <input type="hidden" name="csrf" value="{{$.CSRF}}">
-              <input type="hidden" name="bucket" value="{{$.Open.Name}}">
-              <input type="hidden" name="prefix" value="{{$.Prefix}}">
-              <input type="hidden" name="key" value="{{.Key}}">
-              <button class="ghost danger small">Delete</button>
-            </form>
-            {{end}}
-          </td>
+          <td class="actions"><details class="menu row-menu">
+            <summary class="row-menu-button" aria-label="Actions for {{within $.Prefix .Key}}" title="Actions"><span></span></summary>
+            <div class="pop menu-list">
+              <a class="menu-item" href="/download?bucket={{$.Open.Name}}&amp;key={{.Key}}" download>Download</a>
+              {{if $caps.Delete}}<form method="post" action="/objects/delete" data-confirm="Delete {{within $.Prefix .Key}}?">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{$.Open.Name}}"><input type="hidden" name="prefix" value="{{$.Prefix}}"><input type="hidden" name="key" value="{{.Key}}">
+                <button class="menu-item danger">Delete…</button>
+              </form>{{end}}
+            </div>
+          </details></td>
         </tr>
         {{end}}
         </tbody>
@@ -375,3 +387,40 @@
   </section>
 </div>
 {{template "footer" .}}
+
+{{/* The bar of actions on the files ticked in the table. Without the
+     script it's always shown, and the downloads are plain form posts. */}}
+{{define "selbar"}}
+<form method="post" action="/selection/archive" id="sel" class="selbar" data-full>
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="bucket" value="{{.Bucket}}">
+  <input type="hidden" name="snap" value="{{.Snap}}">
+  <input type="hidden" name="prefix" value="{{.Prefix}}">
+  <span class="selcount muted">Tick files to download{{if .Delete}} or delete{{end}} several at once.</span>
+  <div class="split-button js-only">
+    <button type="button" class="dl-files" title="Download each file on its own">Download</button>
+    <details class="menu">
+      <summary class="button caret" aria-label="Other ways to download" title="Other ways to download"></summary>
+      <div class="pop menu-list">
+        <button class="menu-item" name="format" value="zip" title="One .zip file, streamed as it's made">As a .zip</button>
+        <button class="menu-item" name="format" value="tar" title="One .tar file, streamed as it's made">As a .tar</button>
+      </div>
+    </details>
+  </div>
+  <span class="no-js-only">
+    <button class="ghost small" name="format" value="zip">Download as .zip</button>
+    <button class="ghost small" name="format" value="tar">Download as .tar</button>
+  </span>
+  {{if .Delete}}<button class="ghost danger-outline" formaction="/selection/delete" data-confirm-selection>Delete…</button>{{end}}
+  <button type="button" class="ghost sel-clear js-only">Clear</button>
+</form>
+{{end}}
+
+{{/* Menu items to download one folder as an archive. */}}
+{{define "archiveitems"}}
+<form method="post" action="/selection/archive" data-full>
+  <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="bucket" value="{{.Bucket}}"><input type="hidden" name="snap" value="{{.Snap}}"><input type="hidden" name="prefix" value="{{.Prefix}}"><input type="hidden" name="folder" value="{{.Folder}}">
+  <button class="menu-item" name="format" value="zip">Download as .zip</button>
+  <button class="menu-item" name="format" value="tar">Download as .tar</button>
+</form>
+{{end}}

@@ -71,6 +71,14 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 		"snapURL":    snapURL,
 		"snapKind":   snapshotKind,
 		"inc":        func(i int) int { return i + 1 },
+		// selbar and rowsel give the selection templates what they need
+		// from the page.
+		"selbar": func(p page, canDelete bool) selView {
+			return selView{CSRF: p.CSRF, Bucket: p.Open.Name, Snap: p.Snap, Prefix: p.Prefix, Delete: canDelete && p.Snap == ""}
+		},
+		"rowsel": func(p page, folder string, _ bool) selView {
+			return selView{CSRF: p.CSRF, Bucket: p.Open.Name, Snap: p.Snap, Prefix: p.Prefix, Folder: folder}
+		},
 	}).ParseFS(templateFS, "templates/*.html"))
 	return &Server{
 		Portal: portal, Auth: auth, OIDC: oidcAuth, Sessions: sessions,
@@ -136,6 +144,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /folders", s.authed(s.createFolder))
 	mux.HandleFunc("POST /folders/delete", s.authed(s.deleteFolder))
 	mux.HandleFunc("POST /objects/delete", s.authed(s.deleteObject))
+	// A selection: up to maxSelection names of up to 1 KiB each.
+	mux.HandleFunc("POST /selection/archive", s.authedLimit(2<<20, s.archiveSelection))
+	mux.HandleFunc("POST /selection/list", s.authedLimit(2<<20, s.listSelection))
+	mux.HandleFunc("POST /selection/delete", s.authedLimit(2<<20, s.deleteSelection))
 	// Keys.
 	mux.HandleFunc("GET /keys", s.authedGet(s.keysPage))
 	mux.HandleFunc("GET /keys/new", s.authedGet(s.newKey))
@@ -222,6 +234,12 @@ type page struct {
 	Trash      []ZFSTrashEntry
 }
 
+// selView is what the selection bar and folder menus need.
+type selView struct {
+	CSRF, Bucket, Snap, Prefix, Folder string
+	Delete                             bool
+}
+
 // crumb is one step of the path above the folder being browsed.
 type crumb struct {
 	Name   string
@@ -257,8 +275,14 @@ func (s *Server) authedGet(h handler) http.HandlerFunc {
 
 // authed requires a session and a matching CSRF token.
 func (s *Server) authed(h handler) http.HandlerFunc {
+	return s.authedLimit(64<<10, h)
+}
+
+// authedLimit is authed for forms up to limit bytes, such as a selection
+// of hundreds of file names.
+func (s *Server) authedLimit(limit int64, h handler) http.HandlerFunc {
 	return s.authedGet(func(w http.ResponseWriter, r *http.Request, sess *Session) {
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		if r.PostFormValue("csrf") != sess.CSRF {
 			http.Error(w, "Your session has changed. Go back, reload the page and try again.", http.StatusForbidden)
 			return
@@ -654,6 +678,124 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, sess *Session)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		slog.Warn("download cut short", "user", sess.User.Name, "bucket", bucket, "key", key, "err", err)
 	}
+}
+
+// selection reads a file browser selection from a form.
+func selection(r *http.Request) Selection {
+	return Selection{
+		Bucket: r.PostFormValue("bucket"), Snap: r.PostFormValue("snap"), Prefix: r.PostFormValue("prefix"),
+		Keys: r.PostForm["key"], Folders: r.PostForm["folder"],
+	}
+}
+
+// back is the folder a selection was made in.
+func (sel Selection) back() string {
+	if sel.Snap != "" {
+		return snapURL(sel.Bucket, sel.Snap, sel.Prefix)
+	}
+	return browseURL(sel.Bucket, sel.Prefix)
+}
+
+// archiveSelection streams the selection as a .tar or .zip download.
+func (s *Server) archiveSelection(w http.ResponseWriter, r *http.Request, sess *Session) {
+	sel, format := selection(r), r.PostFormValue("format")
+	if format != "tar" && format != "zip" {
+		redirectFlash(w, r, sel.back(), "", "Archives can be .tar or .zip.")
+		return
+	}
+	// Check what can be checked before anything is sent: after the first
+	// byte, a failure can only cut the download short.
+	if err := sel.check(); err != nil {
+		redirectFlash(w, r, sel.back(), "", userMessage(r, sess, err))
+		return
+	}
+	if _, err := s.Portal.Bucket(r.Context(), sess.User, sel.Bucket, false); err != nil {
+		redirectFlash(w, r, sel.back(), "", userMessage(r, sess, err))
+		return
+	}
+	unlimited(w)
+	h := w.Header()
+	h.Set("Content-Type", map[string]string{"tar": "application/x-tar", "zip": "application/zip"}[format])
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": sel.ArchiveName(format)}))
+	h.Set("Cache-Control", "no-store")
+	cw := &countingWriter{w: w}
+	files, _, err := s.Portal.WriteArchive(r.Context(), sess.User, sel, format, cw)
+	if err != nil && cw.n == 0 {
+		redirectFlash(w, r, sel.back(), "", userMessage(r, sess, err))
+		return
+	}
+	if err != nil {
+		// Too late to say so: end the response without finishing it, so
+		// the browser marks the download failed rather than complete.
+		slog.Warn("archive cut short", "user", sess.User.Name, "bucket", sel.Bucket, "files", files, "err", err)
+		panic(http.ErrAbortHandler)
+	}
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// listSelection lists every file a selection covers, as JSON, for the
+// browser to download one by one.
+func (s *Server) listSelection(w http.ResponseWriter, r *http.Request, sess *Session) {
+	sel := selection(r)
+	type file struct {
+		Key  string `json:"key"`
+		Size int64  `json:"size"`
+	}
+	out := []file{}
+	const max = 20000
+	err := s.Portal.WalkSelection(r.Context(), sess.User, sel, func(o Object) error {
+		if strings.HasSuffix(o.Key, "/") {
+			return nil
+		}
+		if len(out) == max {
+			return userErr("That's more than %d files: download it as a .tar or .zip instead.", max)
+		}
+		out = append(out, file{o.Key, o.Size})
+		return nil
+	})
+	if err != nil {
+		http.Error(w, userMessage(r, sess, err), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+}
+
+func (s *Server) deleteSelection(w http.ResponseWriter, r *http.Request, sess *Session) {
+	sel := selection(r)
+	n, err := s.Portal.DeleteSelection(r.Context(), sess.User, sel)
+	if err != nil {
+		msg := userMessage(r, sess, err)
+		if n > 0 {
+			msg = fmt.Sprintf("Deleted %d files, then: %s", n, msg)
+		}
+		redirectFlash(w, r, sel.back(), "", msg)
+		return
+	}
+	plural := func(n int, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	var parts []string
+	if len(sel.Keys) > 0 {
+		parts = append(parts, plural(len(sel.Keys), "file"))
+	}
+	if len(sel.Folders) > 0 {
+		parts = append(parts, plural(len(sel.Folders), "folder")+" holding "+plural(n-len(sel.Keys), "file"))
+	}
+	redirectFlash(w, r, sel.back(), "Deleted "+strings.Join(parts, " and ")+".", "")
 }
 
 // authedUpload requires a session, and the CSRF token in a header since the

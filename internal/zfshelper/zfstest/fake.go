@@ -75,6 +75,14 @@ func (f *Fake) AddUnmounted(name string) {
 	os.MkdirAll(f.asideDir(name), 0o755)
 }
 
+// AddMounted adds a dataset already mounted at dir, such as a bucket
+// left from an earlier run.
+func (f *Fake) AddMounted(name, dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ds[name] = &dataset{at: dir, props: map[string]string{}}
+}
+
 // Calls returns every command run so far.
 func (f *Fake) Calls() [][]string {
 	f.mu.Lock()
