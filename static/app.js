@@ -74,12 +74,15 @@ function swap(html) {
   // A page that redirects onward itself (the post-login step) gets a real load.
   if (doc.querySelector("meta[http-equiv=refresh]")) return false;
   document.title = doc.title;
+  // The bucket list keeps its place and filter; the admin section list has
+  // no filter.
   const side = document.querySelector(".sidebar");
-  const kept = side && { top: side.scrollTop, filter: document.getElementById("bucket-filter").value };
+  const kept = side && { top: side.scrollTop, filter: document.getElementById("bucket-filter")?.value };
   document.body.replaceWith(document.adoptNode(doc.body));
   const newSide = document.querySelector(".sidebar");
   if (kept && newSide) {
-    document.getElementById("bucket-filter").value = kept.filter;
+    const filter = document.getElementById("bucket-filter");
+    if (filter && kept.filter !== undefined) filter.value = kept.filter;
     newSide.scrollTop = kept.top;
     newSide.dataset.placed = "1";
   }
