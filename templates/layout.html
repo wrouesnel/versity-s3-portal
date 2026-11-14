@@ -44,26 +44,51 @@
 {{end}}
 
 {{define "grants"}}
-{{if .Buckets}}
-<table class="grants">
-  <thead><tr><th>Bucket</th><th>None</th>{{range perms}}<th>{{.Label}}</th>{{end}}</tr></thead>
-  <tbody>
-  {{$g := .Grants}}
-  {{range $b := .Buckets}}{{$p := index $g $b.Name}}
-  <tr>
-    <td><code>{{$b.Name}}</code>{{if $b.Via}}<div class="muted small">via {{join $b.Via ", "}}</div>{{end}}</td>
-    <td><input type="radio" name="perm_{{$b.Name}}" value="" aria-label="{{$b.Name}}: no access" {{if not $p}}checked{{end}}></td>
-    {{range perms}}
-    <td>{{if covers $b.Caps .}}<input type="radio" name="perm_{{$b.Name}}" value="{{.}}" aria-label="{{$b.Name}}: {{.Label}}" {{if eq $p .}}checked{{end}}>{{else if eq $p .}}<input type="radio" name="perm_{{$b.Name}}" value="{{.}}" aria-label="{{$b.Name}}: {{.Label}} (more than you have now)" checked title="More than you have now: limited until you get it back">{{else}}<span class="muted" title="More than you have">–</span>{{end}}</td>
+{{/* Which buckets a key reaches, and how. Every bucket has a row with a
+     level picker; with the script only the chosen ones show, and others
+     are added from the search box. */}}
+<div class="grants-editor" data-grants>
+  {{if or .Buckets .KeyOrphans}}
+  <div class="grant-add">
+    <input type="search" class="grant-search" placeholder="Add a bucket: type to search {{len .Buckets}}" aria-label="Find a bucket to add" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="grant-matches">
+    <ul class="grant-matches" id="grant-matches" role="listbox" hidden></ul>
+  </div>
+  <table class="grants">
+    <thead><tr><th>Bucket</th><th>Owner</th><th>Level</th><th class="actions"></th></tr></thead>
+    <tbody>
+    {{$g := .Grants}}{{$me := .User.Name}}
+    {{range $b := .Buckets}}{{$p := index $g $b.Name}}
+    <tr data-bucket="{{$b.Name}}"{{if $p}} class="granted"{{end}}>
+      <td><span class="bucket-name">{{$b.Name}}</span></td>
+      <td class="muted small">{{if eq $b.Owner $me}}you{{else if $b.Owner}}{{$b.Owner}}{{if $b.Via}} via {{join $b.Via ", "}}{{end}}{{end}}</td>
+      <td><select name="perm_{{$b.Name}}" aria-label="Level for {{$b.Name}}">
+        <option value="">none</option>
+        {{range perms}}{{if covers $b.Caps .}}<option value="{{.}}"{{if eq $p .}} selected{{end}}>{{.Label}}</option>{{else if eq $p .}}<option value="{{.}}" selected>{{.Label}} (more than you have now)</option>{{end}}{{end}}
+      </select></td>
+      <td class="actions"><button type="button" class="ghost small grant-remove js-only" aria-label="Remove {{$b.Name}}" title="Remove">✕</button></td>
+    </tr>
     {{end}}
-  </tr>
+    {{range $b, $p := .KeyOrphans}}
+    <tr data-bucket="{{$b}}" class="granted orphan">
+      <td><span class="bucket-name">{{$b}}</span></td>
+      <td class="muted small">you no longer have access</td>
+      <td><select name="perm_{{$b}}" aria-label="Level for {{$b}}"><option value="">none</option><option value="{{$p}}" selected>{{permLabel $p}} (does nothing now)</option></select></td>
+      <td class="actions"><button type="button" class="ghost small grant-remove js-only" aria-label="Remove {{$b}}" title="Remove">✕</button></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="grants-empty muted">No buckets yet: add some above. A key with none reaches nothing until you edit it.</p>
+  <dl class="levels">
+    <dt>Read &amp; write</dt><dd>List, download, upload, overwrite and delete.</dd>
+    <dt>Add only</dt><dd>List and download, and add new files but never overwrite or delete; uploads must send <code>If-None-Match: *</code> and can't be multipart.</dd>
+    <dt>Read only</dt><dd>List and download.</dd>
+    <dt>Write only</dt><dd>Upload only: can't list, download or delete.</dd>
+  </dl>
+  {{else}}
+  <p class="muted">You don't have any buckets yet. You can create the key now and give it access later.</p>
   {{end}}
-  </tbody>
-</table>
-<p class="muted small"><strong>Add only</strong> keys can read and add new files but never overwrite or delete; uploads must send <code>If-None-Match: *</code> and can't be multipart. <strong>Write only</strong> keys can upload but not list, read or delete.</p>
-{{else}}
-<p class="muted">You don't have any buckets yet. You can create the key now and give it access later.</p>
-{{end}}
+</div>
 {{end}}
 
 {{define "perms"}}{{if .}}<ul class="perms">{{range $b, $p := .}}<li><code>{{$b}}</code> <span class="pill {{$p}}">{{permLabel $p}}</span></li>{{end}}</ul>{{else}}<span class="muted">no buckets</span>{{end}}{{end}}

@@ -6,8 +6,9 @@
   </div>
   <p class="muted">Keys let apps and tools reach buckets over S3. Each key reaches only the buckets you give it, at most at your own level. Make one per app or device, so you can revoke it on its own.</p>
   {{if .Keys}}
-  <table class="keys">
-    <thead><tr><th>Name</th><th>Access key ID</th><th>Buckets</th><th></th></tr></thead>
+  <input type="search" class="table-filter" data-table="#my-keys" placeholder="Filter {{len .Keys}} keys by name, ID or bucket" aria-label="Filter keys">
+  <table class="keys" id="my-keys">
+    <thead><tr><th data-sort="text">Name</th><th data-sort="text">Access key ID</th><th>Buckets</th><th class="actions"></th></tr></thead>
     <tbody>
     {{range .Keys}}{{$now := index $.KeyCaps .Access}}
     <tr>
@@ -15,22 +16,27 @@
       <td><code class="copy">{{.Access}}</code></td>
       <td>
         {{if .Buckets}}
+        {{$n := len .Buckets}}
+        {{if gt $n 4}}<details class="more-buckets"><summary>{{$n}} buckets</summary>{{end}}
         <ul class="perms">
           {{range $b, $p := .Buckets}}{{$c := index $now $b}}
-          <li><code>{{$b}}</code> <span class="pill {{$p}}">{{permLabel $p}}</span>
+          <li><span class="bucket-name">{{$b}}</span> <span class="pill {{$p}}">{{permLabel $p}}</span>
             {{if not (covers $c $p)}}<span class="pill warn" title="You no longer have this much access, so the key is limited too">{{if $c.Any}}now {{capsLabel $c}}{{else}}suspended{{end}}</span>{{end}}</li>
           {{end}}
         </ul>
+        {{if gt $n 4}}</details>{{end}}
         {{else}}<span class="muted">no buckets</span>{{end}}
       </td>
-      <td class="actions">
-        <a class="button ghost small" href="/keys/edit?access={{.Access}}">Edit</a>
-        <form method="post" action="/keys/delete" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <input type="hidden" name="access" value="{{.Access}}">
-          <button class="ghost danger small">Revoke</button>
-        </form>
-      </td>
+      <td class="actions"><details class="menu row-menu">
+        <summary class="button ghost small actions-button" aria-label="Actions for {{.Label}}">Actions</summary>
+        <div class="pop menu-list">
+          <a class="menu-item" href="/keys/edit?access={{.Access}}">Edit name and buckets</a>
+          <form method="post" action="/keys/delete" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="access" value="{{.Access}}">
+            <button class="menu-item danger">Revoke key…</button>
+          </form>
+        </div>
+      </details></td>
     </tr>
     {{end}}
     </tbody>

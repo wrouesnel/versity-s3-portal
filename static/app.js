@@ -332,6 +332,126 @@ document.addEventListener("input", (ev) => {
   }
 });
 
+// --------------------------------------------------------------- key form
+
+// The key form lists only the buckets the key reaches; others are added
+// from a search box, at the most the person can give.
+const MAX_MATCHES = 50;
+
+function grantRows(ed) {
+  return [...ed.querySelectorAll("tbody tr[data-bucket]")];
+}
+
+function syncGrants(ed) {
+  const any = grantRows(ed).some((tr) => tr.classList.contains("granted"));
+  ed.querySelector("table.grants").hidden = !any;
+  const empty = ed.querySelector(".grants-empty");
+  if (empty) empty.hidden = any;
+}
+
+function showMatches(ed) {
+  const input = ed.querySelector(".grant-search");
+  const list = ed.querySelector(".grant-matches");
+  const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+  const free = grantRows(ed).filter((tr) => !tr.classList.contains("granted") && words.every((w) => tr.dataset.bucket.toLowerCase().includes(w)));
+  list.replaceChildren();
+  for (const tr of free.slice(0, MAX_MATCHES)) {
+    const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.dataset.bucket = tr.dataset.bucket;
+    const name = document.createElement("span");
+    name.textContent = tr.dataset.bucket;
+    const owner = document.createElement("span");
+    owner.className = "muted small";
+    owner.textContent = tr.children[1].textContent.trim();
+    li.append(name, owner);
+    list.append(li);
+  }
+  if (free.length > MAX_MATCHES) {
+    const more = document.createElement("li");
+    more.className = "more muted small";
+    more.textContent = `…and ${free.length - MAX_MATCHES} more: keep typing`;
+    list.append(more);
+  } else if (!free.length) {
+    const none = document.createElement("li");
+    none.className = "more muted small";
+    none.textContent = words.length ? "No other buckets match." : "Every bucket you have is on this key.";
+    list.append(none);
+  }
+  const first = list.querySelector("li[data-bucket]");
+  if (first) first.classList.add("active");
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+}
+
+function hideMatches(ed) {
+  ed.querySelector(".grant-matches").hidden = true;
+  ed.querySelector(".grant-search").setAttribute("aria-expanded", "false");
+}
+
+function addGrant(ed, bucket) {
+  const tr = grantRows(ed).find((r) => r.dataset.bucket === bucket);
+  if (!tr) return;
+  const sel = tr.querySelector("select");
+  if (!sel.value) sel.selectedIndex = 1; // the most this person can give
+  tr.classList.add("granted", "just-added");
+  setTimeout(() => tr.classList.remove("just-added"), 1200);
+  syncGrants(ed);
+  const input = ed.querySelector(".grant-search");
+  input.value = "";
+  showMatches(ed);
+  input.focus();
+}
+
+document.addEventListener("focusin", (ev) => {
+  const input = ev.target.closest && ev.target.closest(".grant-search");
+  if (input) showMatches(input.closest("[data-grants]"));
+});
+document.addEventListener("input", (ev) => {
+  const input = ev.target.closest && ev.target.closest(".grant-search");
+  if (input) showMatches(input.closest("[data-grants]"));
+});
+document.addEventListener("keydown", (ev) => {
+  const input = ev.target.closest && ev.target.closest(".grant-search");
+  if (!input) return;
+  const ed = input.closest("[data-grants]");
+  const items = [...ed.querySelectorAll(".grant-matches li[data-bucket]")];
+  const at = items.findIndex((li) => li.classList.contains("active"));
+  if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+    ev.preventDefault();
+    if (!items.length) return;
+    const next = items[(at + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length];
+    items.forEach((li) => li.classList.toggle("active", li === next));
+    next.scrollIntoView({ block: "nearest" });
+  } else if (ev.key === "Enter") {
+    // Adds the highlighted bucket rather than submitting the form.
+    ev.preventDefault();
+    if (at >= 0) addGrant(ed, items[at].dataset.bucket);
+  } else if (ev.key === "Escape") {
+    input.value = "";
+    hideMatches(ed);
+  }
+});
+document.addEventListener("mousedown", (ev) => {
+  const li = ev.target.closest && ev.target.closest(".grant-matches li[data-bucket]");
+  if (li) {
+    ev.preventDefault(); // keep focus in the search box
+    addGrant(li.closest("[data-grants]"), li.dataset.bucket);
+    return;
+  }
+  for (const ed of document.querySelectorAll("[data-grants]")) {
+    if (!ed.querySelector(".grant-add").contains(ev.target)) hideMatches(ed);
+  }
+});
+document.addEventListener("click", (ev) => {
+  const rm = ev.target.closest && ev.target.closest(".grant-remove");
+  if (!rm) return;
+  const tr = rm.closest("tr");
+  tr.querySelector("select").value = "";
+  tr.classList.remove("granted");
+  syncGrants(tr.closest("[data-grants]"));
+});
+
 // placeCurrentBucket scrolls the sidebar to the open bucket on a fresh load.
 function placeCurrentBucket() {
   const side = document.querySelector(".sidebar");
@@ -457,6 +577,7 @@ document.addEventListener("keydown", (ev) => {
 
 function enhance() {
   addCopyButtons();
+  for (const ed of document.querySelectorAll("[data-grants]")) if (ed.querySelector("table.grants")) syncGrants(ed);
   for (const f of document.querySelectorAll("input.table-filter")) if (f.value) f.dispatchEvent(new Event("input", { bubbles: true }));
   syncSelection();
   filterBuckets();

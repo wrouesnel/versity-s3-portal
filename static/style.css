@@ -323,3 +323,24 @@ summary.actions-button { list-style: none; gap: 4px; }
 summary.actions-button::after { content: ""; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid currentColor; }
 .grant { white-space: nowrap; margin-right: 6px; }
 .pane > .danger-zone { margin-top: 0; }
+
+/* Key form: the buckets a key reaches, and a search to add more */
+html.js .grants-editor tbody tr:not(.granted) { display: none; }
+.grants-editor table.grants td, .grants-editor table.grants th { text-align: left; }
+.grants-editor table.grants td.actions { text-align: right; }
+.grants-editor tr.orphan .bucket-name { text-decoration: line-through; color: var(--muted); }
+.grants-editor tr.just-added { background: var(--accent-soft); transition: background 1s; }
+.grant-add { position: relative; max-width: 420px; margin: 4px 0 10px; }
+.grant-add input { margin: 0; }
+.grant-matches { position: absolute; z-index: 6; left: 0; right: 0; top: calc(100% + 2px); max-height: 320px; overflow-y: auto; margin: 0; padding: 4px 0; list-style: none; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 6px 18px rgb(0 0 0 / 12%); }
+.grant-matches li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 10px; cursor: pointer; }
+.grant-matches li.active, .grant-matches li[data-bucket]:hover { background: var(--accent-soft); }
+.grant-matches li.more { cursor: default; }
+.grants-editor select { padding: 2px 6px; }
+details.more-buckets summary { cursor: pointer; color: var(--accent); }
+details.more-buckets[open] summary { margin-bottom: 4px; }
+table.keys .bucket-name { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .85em; }
+[hidden] { display: none !important; }
+html:not(.js) .grant-add, html:not(.js) .grants-empty { display: none; }
+.grants-editor table.grants { max-width: 900px; }
+input[name=label] { max-width: 420px; }

@@ -165,9 +165,10 @@ func (s *Server) Handler() http.Handler {
 	// Keys.
 	mux.HandleFunc("GET /keys", s.authedGet(s.keysPage))
 	mux.HandleFunc("GET /keys/new", s.authedGet(s.newKey))
-	mux.HandleFunc("POST /keys", s.authed(s.createKey))
+	// A level for every bucket the person can see: hundreds of fields.
+	mux.HandleFunc("POST /keys", s.authedLimit(1<<20, s.createKey))
 	mux.HandleFunc("GET /keys/edit", s.authedGet(s.editKey))
-	mux.HandleFunc("POST /keys/edit", s.authed(s.updateKey))
+	mux.HandleFunc("POST /keys/edit", s.authedLimit(1<<20, s.updateKey))
 	mux.HandleFunc("POST /keys/delete", s.authed(s.deleteKey))
 	// Admin.
 	mux.HandleFunc("GET /admin", s.authedGet(s.admin(s.adminPage)))
@@ -225,6 +226,8 @@ type page struct {
 	KeySecret string
 	KeyLabel  string
 	Grants    map[string]Perm
+	// KeyOrphans are a key's grants on buckets its owner can't see now.
+	KeyOrphans map[string]Perm
 	// The file browser.
 	Prefix    string
 	Crumbs    []crumb
@@ -951,6 +954,20 @@ func (s *Server) keyForm(w http.ResponseWriter, r *http.Request, sess *Session, 
 	p.Buckets = buckets
 	if p.Grants == nil {
 		p.Grants = map[string]Perm{}
+	}
+	// Grants on buckets the person can no longer see still show, so
+	// saving doesn't quietly drop them.
+	visible := map[string]bool{}
+	for _, b := range buckets {
+		visible[b.Name] = true
+	}
+	for b, perm := range p.Grants {
+		if !visible[b] {
+			if p.KeyOrphans == nil {
+				p.KeyOrphans = map[string]Perm{}
+			}
+			p.KeyOrphans[b] = perm
+		}
 	}
 	s.render(w, status, name, p)
 }
