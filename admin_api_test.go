@@ -24,6 +24,21 @@ func TestRegisterFromDirectory(t *testing.T) {
 	}}
 
 	userError(t, "not an admin", firstErr(p.RegisterFromDirectory(ctx, bob, "alice")))
+	userError(t, "a directory check, not an admin", firstErr(p.DirectoryCheck(bob, "alice")))
+	for name, want := range map[string]DirectoryStatus{
+		"alice":     {User: "alice", Allowed: true},
+		"carol":     {User: "carol", Reason: "account disabled"},
+		"nobody":    {User: "nobody", Reason: "not in the directory"},
+		"Bad Name!": {User: "Bad Name!", Reason: "not a valid username"},
+	} {
+		got, err := p.DirectoryCheck(admin, name)
+		if err != nil || got != want {
+			t.Errorf("directory check %s: %+v %v, want %+v", name, got, err, want)
+		}
+	}
+	if _, known := store.Person("alice"); known {
+		t.Fatal("a directory check recorded alice")
+	}
 	status, err := p.RegisterFromDirectory(ctx, admin, " alice ")
 	ok(t, "register alice", err)
 	person, known := store.Person("alice")
@@ -35,6 +50,10 @@ func TestRegisterFromDirectory(t *testing.T) {
 	}
 	if _, _, err := p.CreateKeyFor(ctx, admin, "alice", "x", nil); err == nil || strings.Contains(err.Error(), "logged in") {
 		t.Errorf("alice registered should get past knownPerson: %v", err)
+	}
+
+	if got, _ := p.DirectoryCheck(admin, "alice"); !got.Known || !got.Allowed {
+		t.Errorf("directory check after registering: %+v", got)
 	}
 
 	// Again: checked, not recorded twice.

@@ -74,6 +74,35 @@ func (p *Portal) RegisterFromDirectory(ctx context.Context, admin User, name str
 	return status, nil
 }
 
+// DirectoryStatus is whether the directory would let someone use the service.
+type DirectoryStatus struct {
+	User    string `json:"user"`
+	Known   bool   `json:"known"`
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// DirectoryCheck asks the directory whether someone could be registered, as
+// RegisterFromDirectory would, without recording anything.
+func (p *Portal) DirectoryCheck(admin User, name string) (DirectoryStatus, error) {
+	if err := requireAdmin(admin); err != nil {
+		return DirectoryStatus{}, err
+	}
+	if p.dir == nil {
+		return DirectoryStatus{}, errNoDirectory
+	}
+	name = p.directoryName(name)
+	_, known := p.store.Person(name)
+	if !usernameRe.MatchString(name) {
+		return DirectoryStatus{User: name, Reason: "not a valid username"}, nil
+	}
+	d, err := p.dir.Check(name)
+	if err != nil {
+		return DirectoryStatus{}, err
+	}
+	return DirectoryStatus{User: name, Known: known, Allowed: !d.Disabled, Reason: d.Reason}, nil
+}
+
 // EnsureBucketFor makes a bucket for someone, for admins, as CreateBucketFor does, unless
 // it's already theirs. It returns whether it made it. A bucket of that name owned by
 // someone else is an error.

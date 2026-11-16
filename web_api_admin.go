@@ -26,6 +26,7 @@ func apiCaller(r *http.Request) User {
 // data", for automation such as a migration: register someone from the directory, make
 // their bucket, issue them a key on it, and revoke it after.
 func (s *Server) adminAPIRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/users/{name}/directory", s.api(s.apiDirectoryCheck))
 	mux.HandleFunc("POST /api/users/{name}/register", s.api(s.apiRegisterUser))
 	mux.HandleFunc("POST /api/buckets", s.api(s.apiEnsureBucket))
 	mux.HandleFunc("POST /api/keys", s.api(s.apiIssueKey))
@@ -40,6 +41,10 @@ func decodeAPI(r *http.Request, v any) error {
 		return userErr("The request isn't valid JSON for this call: %v", err)
 	}
 	return nil
+}
+
+func (s *Server) apiDirectoryCheck(r *http.Request) (any, error) {
+	return s.Portal.DirectoryCheck(apiCaller(r), r.PathValue("name"))
 }
 
 func (s *Server) apiRegisterUser(r *http.Request) (any, error) {

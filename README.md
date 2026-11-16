@@ -190,6 +190,9 @@ they pick.
 
   And the admin page's "make a bucket for someone" and "issue a key to load
   data", for a migration loading data in for people:
+  - `GET /api/users/<name>/directory` says whether the directory would let
+    someone be registered (`allowed`, else the `reason`), recording nothing:
+    for a migration's dry run.
   - `POST /api/users/<name>/register` records someone the directory has as
     their logging in would (its ids, groups and admin rights), so buckets and
     keys can be made for them before they've logged in. It's refused, and
