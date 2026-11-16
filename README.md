@@ -50,6 +50,16 @@ they pick.
   - Groups to suggest are `(objectClass=group)`.
   - The search account needs only to read users and groups: any domain
     user can. Bind as its DN or `name@domain`.
+  - **LDAPS to DCs.** Few DCs' certificates have the domain's name, or an
+    address: only the DC's own host name. When a server reached by
+    `ldaps://` presents a certificate without the name (or address) it was
+    reached by, the portal looks its address up in reverse, and tries again
+    by that name if it resolves back to the same address and is one of the
+    domain's DCs (the `_ldap._tcp.dc._msdcs` SRV records of the base DN's
+    domain, which only DCs register). The certificate must still have that
+    name and come from a trusted CA. A name that isn't a DC's is never
+    taken: any domain computer has a certificate from the domain's CA, and
+    could otherwise stand in for a DC by registering its own records.
 - **OIDC login** (optional, alongside or instead of LDAP): the
   authorization code flow with PKCE, a nonce, and a signed short-lived cookie
   holding the flow's state.

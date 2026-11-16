@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
@@ -183,7 +182,7 @@ func userFilter(username string) string {
 }
 
 func (a *LDAPAuth) dial() (*ldap.Conn, error) {
-	tlsConfig := &tls.Config{ServerName: a.ServerName, MinVersion: tls.VersionTLS12}
+	var roots *x509.CertPool
 	if a.CAFile != "" {
 		pem, err := os.ReadFile(a.CAFile)
 		if err != nil {
@@ -193,14 +192,14 @@ func (a *LDAPAuth) dial() (*ldap.Conn, error) {
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("no certificates in %s", a.CAFile)
 		}
-		tlsConfig.RootCAs = pool
+		roots = pool
 	}
 	// URL may name several servers, separated by spaces (a domain's DCs):
 	// each is tried in turn until one answers.
 	var conn *ldap.Conn
 	var errs []error
 	for _, u := range strings.Fields(a.URL) {
-		c, err := ldap.DialURL(u, ldap.DialWithTLSConfig(tlsConfig))
+		c, err := a.dialURL(u, roots)
 		if err == nil {
 			conn = c
 			break
