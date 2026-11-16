@@ -85,6 +85,8 @@ const adInChain = "1.2.840.113556.1.4.1941"
 // attributes), else IDRangeBase plus the account's RID and its primary
 // group's, else DefaultUID and DefaultGID.
 type LDAPAuth struct {
+	// URL is the directory's, or several, separated by spaces, tried in
+	// turn (a domain's DCs, by the names their certificates have).
 	URL          string
 	ServerName   string
 	CAFile       string
@@ -193,9 +195,20 @@ func (a *LDAPAuth) dial() (*ldap.Conn, error) {
 		}
 		tlsConfig.RootCAs = pool
 	}
-	conn, err := ldap.DialURL(a.URL, ldap.DialWithTLSConfig(tlsConfig))
-	if err != nil {
-		return nil, fmt.Errorf("connect to LDAP: %w", err)
+	// URL may name several servers, separated by spaces (a domain's DCs):
+	// each is tried in turn until one answers.
+	var conn *ldap.Conn
+	var errs []error
+	for _, u := range strings.Fields(a.URL) {
+		c, err := ldap.DialURL(u, ldap.DialWithTLSConfig(tlsConfig))
+		if err == nil {
+			conn = c
+			break
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", u, err))
+	}
+	if conn == nil {
+		return nil, fmt.Errorf("connect to LDAP: %w", errors.Join(errs...))
 	}
 	conn.SetTimeout(10 * time.Second)
 	if err := conn.Bind(a.BindDN, a.BindPassword); err != nil {

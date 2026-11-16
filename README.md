@@ -264,7 +264,7 @@ they pick.
 | `VGW_ADMIN_ENDPOINT` | Gateway admin API, e.g. `http://versitygw:7071` |
 | `VGW_REGION` | Gateway region (default `us-east-1`) |
 | `VGW_ROOT_ACCESS`, `VGW_ROOT_SECRET` | Gateway root credentials (or `*_FILE`) |
-| `LDAP_URL` | e.g. `ldaps://ldap.example.com:636`. Leave unset to turn off password login. |
+| `LDAP_URL` | e.g. `ldaps://ldap.example.com:636`, or several separated by spaces, tried in turn (as a domain's DCs: `ldaps://dc1.example.com ldaps://dc2.example.com`). Leave unset to turn off password login. |
 | `LDAP_SERVER_NAME` | TLS server name, when the URL is an IP |
 | `LDAP_CA_FILE` | CA bundle for the LDAP server (default: system roots) |
 | `LDAP_BASE_DN` | Where users are searched for, e.g. `dc=example,dc=com` |

@@ -88,6 +88,12 @@ func TestADIntegration(t *testing.T) {
 	if d := all[outsider]; !d.Disabled || d.Reason != "not in the allowed group" {
 		t.Errorf("CheckAll %s: %+v", outsider, d)
 	}
+	// With a server listed first which doesn't answer: the next is tried.
+	failover := *a
+	failover.URL = "ldap://127.0.0.1:1 " + a.URL
+	if u, err := failover.Authenticate(user, password); err != nil || u.Name != user {
+		t.Errorf("past a server down: %+v %v", u, err)
+	}
 	groups, err := a.Groups()
 	if err != nil || !slices.Contains(groups, groupName(a.AllowedGroup)) {
 		t.Errorf("Groups: %v %v", groups, err)
