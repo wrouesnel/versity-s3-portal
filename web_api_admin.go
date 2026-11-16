@@ -1,0 +1,129 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+)
+
+// apiCallerKey holds, in an API request's context, who made the call.
+type apiCallerKey struct{}
+
+// apiTokenAdmin is who an API_TOKEN call acts as: an admin, recorded as "api-token" on the
+// keys it issues and in the log.
+var apiTokenAdmin = User{Name: "api-token", Admin: true}
+
+// apiCaller is who made an API call: apiTokenAdmin for the token, or the admin whose session
+// it was.
+func apiCaller(r *http.Request) User {
+	u, _ := r.Context().Value(apiCallerKey{}).(User)
+	return u
+}
+
+// adminAPIRoutes are the admin page's "make a bucket for someone" and "issue a key to load
+// data", for automation such as a migration: register someone from the directory, make
+// their bucket, issue them a key on it, and revoke it after.
+func (s *Server) adminAPIRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/users/{name}/register", s.api(s.apiRegisterUser))
+	mux.HandleFunc("POST /api/buckets", s.api(s.apiEnsureBucket))
+	mux.HandleFunc("POST /api/keys", s.api(s.apiIssueKey))
+	mux.HandleFunc("DELETE /api/keys/{access}", s.api(s.apiRevokeKey))
+}
+
+// decodeAPI reads a JSON request body, refusing unknown fields and bodies over 64 KiB.
+func decodeAPI(r *http.Request, v any) error {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return userErr("The request isn't valid JSON for this call: %v", err)
+	}
+	return nil
+}
+
+func (s *Server) apiRegisterUser(r *http.Request) (any, error) {
+	return s.Portal.RegisterFromDirectory(r.Context(), apiCaller(r), r.PathValue("name"))
+}
+
+// APIBucketRequest asks for a bucket for someone.
+type APIBucketRequest struct {
+	Owner string `json:"owner"`
+	Name  string `json:"name"`
+}
+
+// APIBucketResult is a bucket made, or found already theirs.
+type APIBucketResult struct {
+	Name    string `json:"name"`
+	Owner   string `json:"owner"`
+	Created bool   `json:"created"`
+}
+
+func (s *Server) apiEnsureBucket(r *http.Request) (any, error) {
+	var req APIBucketRequest
+	if err := decodeAPI(r, &req); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(req.Name)
+	created, err := s.Portal.EnsureBucketFor(r.Context(), apiCaller(r), req.Owner, name)
+	if err != nil {
+		return nil, err
+	}
+	return APIBucketResult{Name: name, Owner: strings.TrimSpace(req.Owner), Created: created}, nil
+}
+
+// APIKeyRequest asks for a key for someone on their buckets, as the admin page's "issue a
+// key to load data" does.
+type APIKeyRequest struct {
+	Owner   string          `json:"owner"`
+	Label   string          `json:"label"`
+	Buckets map[string]Perm `json:"buckets"`
+}
+
+// APIKeyResult is an issued key. The secret is given only here.
+type APIKeyResult struct {
+	Owner     string          `json:"owner"`
+	AccessKey string          `json:"access_key"`
+	SecretKey string          `json:"secret_key"`
+	Buckets   map[string]Perm `json:"buckets"`
+}
+
+func (s *Server) apiIssueKey(r *http.Request) (any, error) {
+	var req APIKeyRequest
+	if err := decodeAPI(r, &req); err != nil {
+		return nil, err
+	}
+	for bucket, perm := range req.Buckets {
+		if !perm.Valid() {
+			return nil, userErr("%q isn't a level of access (for %s).", perm, bucket)
+		}
+	}
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = "Issued by " + apiCaller(r).Name
+	}
+	access, secret, err := s.Portal.CreateKeyFor(r.Context(), apiCaller(r), req.Owner, label, req.Buckets)
+	if err != nil {
+		return nil, err
+	}
+	return APIKeyResult{Owner: strings.TrimSpace(req.Owner), AccessKey: access, SecretKey: secret, Buckets: req.Buckets}, nil
+}
+
+func (s *Server) apiRevokeKey(r *http.Request) (any, error) {
+	caller := apiCaller(r)
+	if err := requireAdmin(caller); err != nil {
+		return nil, err
+	}
+	access := r.PathValue("access")
+	if err := s.Portal.RevokeKey(r.Context(), caller, access); err != nil {
+		var ue *UserError
+		if errors.As(err, &ue) {
+			// Revoking is idempotent: a key already gone is revoked.
+			if _, exists := s.Portal.store.Get(access); !exists {
+				return map[string]string{"revoked": access}, nil
+			}
+		}
+		return nil, err
+	}
+	return map[string]string{"revoked": access}, nil
+}

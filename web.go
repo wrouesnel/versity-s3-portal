@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
@@ -213,6 +214,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
 	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
 	mux.HandleFunc("POST /api/users/{name}/check", s.api(s.apiCheckUser))
+	s.adminAPIRoutes(mux)
 	return securityHeaders(mux)
 }
 
@@ -1267,14 +1269,15 @@ func (s *Server) adminEndSessions(w http.ResponseWriter, r *http.Request, sess *
 // admin's session with the CSRF token in X-CSRF-Token. It answers in JSON.
 func (s *Server) api(h func(r *http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		allowed, who := false, ""
+		allowed, who, caller := false, "", User{}
 		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 			allowed = s.APIToken != "" && subtle.ConstantTimeCompare([]byte(bearer), []byte(s.APIToken)) == 1
-			who = "token"
+			who, caller = "token", apiTokenAdmin
 		} else if sess, err := s.Sessions.Get(r); err == nil && sess.User.Admin {
 			allowed = r.Method == http.MethodGet || r.Header.Get("X-CSRF-Token") == sess.CSRF
-			who = sess.User.Name
+			who, caller = sess.User.Name, sess.User
 		}
+		r = r.WithContext(context.WithValue(r.Context(), apiCallerKey{}, caller))
 		w.Header().Set("Content-Type", "application/json")
 		if !allowed {
 			w.WriteHeader(http.StatusUnauthorized)

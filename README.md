@@ -188,6 +188,28 @@ they pick.
     status;
   - `GET /api/users/<name>` returns their status as last recorded.
 
+  And the admin page's "make a bucket for someone" and "issue a key to load
+  data", for a migration loading data in for people:
+  - `POST /api/users/<name>/register` records someone the directory has as
+    their logging in would (its ids, groups and admin rights), so buckets and
+    keys can be made for them before they've logged in. It's refused, and
+    nothing is recorded, if the directory wouldn't let them log in: not in
+    it, not in the users group, disabled, locked or expired. Someone already
+    known is checked again instead.
+  - `POST /api/buckets` with `{"owner": "alice", "name": "home-alice"}`
+    makes the bucket theirs, as the admin page does, and answers
+    `{"created": true}`. A bucket of that name already theirs answers
+    `{"created": false}`; anyone else's is refused.
+  - `POST /api/keys` with `{"owner": "alice", "label": "...",
+    "buckets": {"home-alice": "readwrite"}}` issues them a key, as the admin
+    page does, and answers with `access_key` and `secret_key`, given only
+    then. The levels are `read`, `readwrite`, `createonly` and `writeonly`.
+  - `DELETE /api/keys/<access key>` revokes it. A key already gone counts as
+    revoked.
+
+  Keys issued with the token are recorded as issued by `api-token`; with an
+  admin's session, by that admin.
+
   Calls need `Authorization: Bearer <API_TOKEN>`, or an admin's session
   with the CSRF token in `X-CSRF-Token`. For example:
 
