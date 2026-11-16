@@ -35,7 +35,8 @@ they pick.
     without case: `Alice` logs in as `alice`.
   - `ALLOWED_GROUP_DN` and `ADMIN_GROUP_DN` count nested groups (AD's
     `LDAP_MATCHING_RULE_IN_CHAIN`), so a site's own groups can be made
-    members of them. The groups shown for grants are the person's direct
+    members of them. Admins may log in without being in the allowed group
+    too, with LDAP of either schema and with OIDC. The groups shown for grants are the person's direct
     `memberOf`.
   - Their uid and gid are their `uidNumber` and `gidNumber` where AD has
     them (its RFC 2307 attributes). Otherwise, with `LDAP_ID_RANGE_BASE`,

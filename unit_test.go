@@ -199,6 +199,10 @@ func TestLDAPEntries(t *testing.T) {
 			t.Errorf("%s: want disabled, got %+v %v", name, d, err)
 		}
 	}
+	// In the admins' group alone: admins needn't be in the allowed group.
+	if d, err := posixEntry(a, entry(map[string][]string{"memberOf": {"ou=s3-admin,ou=groups,dc=example,dc=com"}})); err != nil || d.Disabled || !d.Admin {
+		t.Errorf("an admin outside the allowed group: %+v %v", d, err)
+	}
 	for name, attrs := range map[string]map[string][]string{
 		"expires later": {"shadowExpire": {"20001"}},
 		"never expires": {"shadowExpire": {"-1"}},
@@ -279,11 +283,20 @@ func TestADEntries(t *testing.T) {
 	if d, err := a.entry(entry(nil), nested); err != nil || d.UID != 900 || d.GID != 900 {
 		t.Errorf("alice by the defaults: %+v %v", d, err)
 	}
-	if d, _ := a.entry(entry(nil), func(g string) bool { return !strings.Contains(g, "s3-users") }); !d.Disabled || d.Admin {
-		t.Errorf("outside the allowed group: %+v", d)
+	if d, _ := a.entry(entry(nil), func(string) bool { return false }); !d.Disabled || d.Admin {
+		t.Errorf("in neither group: %+v", d)
 	}
 	if d, _ := a.entry(entry(nil), func(g string) bool { return strings.Contains(g, "s3-users") }); d.Disabled || d.Admin {
 		t.Errorf("a user, not an admin: %+v", d)
+	}
+	// In the admins' group (nested, as AD counts it) and not the users':
+	// admins needn't be in the allowed group.
+	if d, _ := a.entry(entry(nil), func(g string) bool { return strings.Contains(g, "s3-admins") }); d.Disabled || !d.Admin {
+		t.Errorf("an admin outside the allowed group: %+v", d)
+	}
+	// Disabled, an admin is still refused.
+	if d, _ := a.entry(entry(map[string][]string{"userAccountControl": {"514"}}), func(g string) bool { return strings.Contains(g, "s3-admins") }); !d.Disabled || d.Admin {
+		t.Errorf("a disabled admin: %+v", d)
 	}
 	for name, attrs := range map[string]map[string][]string{
 		"disabled":   {"userAccountControl": {"514"}},

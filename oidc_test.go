@@ -185,6 +185,13 @@ func TestOIDCLogin(t *testing.T) {
 		t.Fatalf("bob outside the group: %d", rec.Code)
 	}
 
+	// In the admins' group alone: admins needn't be in the allowed group.
+	f.userinfo = map[string]any{"groups": []any{"s3-admin"}}
+	rec = f.login(t, h, map[string]any{"sub": "u6", "email": "erin@example.com"})
+	if sess := sessionFrom(t, sessions, rec); sess == nil || !sess.User.Admin {
+		t.Fatalf("erin, an admin outside the allowed group: %d %+v", rec.Code, sess)
+	}
+
 	// Not an admin.
 	f.userinfo = map[string]any{"groups": []any{"s3-users"}}
 	rec = f.login(t, h, map[string]any{"sub": "u4", "email": "carol@example.com"})

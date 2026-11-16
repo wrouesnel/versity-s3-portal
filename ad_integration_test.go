@@ -10,8 +10,10 @@ import (
 // the ad schema. AD_TEST_URL, AD_TEST_BASE_DN, AD_TEST_BIND_DN and
 // AD_TEST_BIND_PASSWORD point at it and its search account. AD_TEST_GROUP_DN
 // is the allowed group, which AD_TEST_USER is in only through a nested group;
-// AD_TEST_ADMIN is in AD_TEST_ADMIN_GROUP_DN; AD_TEST_DISABLED's account is
-// disabled; AD_TEST_OUTSIDER is in neither. All have AD_TEST_PASSWORD.
+// AD_TEST_ADMIN is in AD_TEST_ADMIN_GROUP_DN; AD_TEST_NESTED_ADMIN is in it
+// only through a nested group, and not in AD_TEST_GROUP_DN; AD_TEST_DISABLED's
+// account is disabled; AD_TEST_OUTSIDER is in neither. All have
+// AD_TEST_PASSWORD.
 func TestADIntegration(t *testing.T) {
 	url := os.Getenv("AD_TEST_URL")
 	if url == "" {
@@ -45,6 +47,16 @@ func TestADIntegration(t *testing.T) {
 	}
 	if u, err := a.Authenticate(admin, password); err != nil || !u.Admin {
 		t.Errorf("%s: want an admin, got %+v %v", admin, u, err)
+	}
+	// An admin through a nested group, outside the allowed group: admins
+	// needn't be in it.
+	if nested := os.Getenv("AD_TEST_NESTED_ADMIN"); nested != "" {
+		if u, err := a.Authenticate(nested, password); err != nil || !u.Admin {
+			t.Errorf("%s: want an admin, through the nested group, got %+v %v", nested, u, err)
+		}
+		if d, err := a.Check(nested); err != nil || d.Disabled || !d.Admin {
+			t.Errorf("Check %s: %+v %v", nested, d, err)
+		}
 	}
 	for name, pw := range map[string]string{
 		user: "wrong", disabled: password, outsider: password, "nosuchuser": password,

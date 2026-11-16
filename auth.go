@@ -91,7 +91,8 @@ type LDAPAuth struct {
 	BaseDN       string
 	BindDN       string
 	BindPassword string
-	// AllowedGroup, when set, is the group DN users must have in memberOf.
+	// AllowedGroup, when set, is the group DN users must have in memberOf,
+	// unless they are in AdminGroup, which lets its members in too.
 	AllowedGroup string
 	// AdminGroup, when set, is the group DN that makes users admins.
 	AdminGroup string
@@ -461,7 +462,9 @@ func (a *LDAPAuth) entry(e *ldap.Entry, inGroup func(string) bool) (DirEntry, er
 	// Never map anyone onto root's files.
 	case uid == 0 || gid == 0:
 		d.Disabled, d.Reason = true, "root ids"
-	case a.AllowedGroup != "" && !inGroup(a.AllowedGroup):
+	// The admins' group lets its members in too: an admin needn't be in
+	// the allowed group as well.
+	case a.AllowedGroup != "" && !d.Admin && !inGroup(a.AllowedGroup):
 		d.Disabled, d.Reason = true, "not in the allowed group"
 	case a.ad():
 		d.Disabled, d.Reason = adAccountLocked(e, now())

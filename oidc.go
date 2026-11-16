@@ -40,7 +40,8 @@ type OIDCAuth struct {
 	GIDClaim      string
 	DefaultUID    int
 	DefaultGID    int
-	// AllowedGroup, when set, must be in the groups claim to log in.
+	// AllowedGroup, when set, must be in the groups claim to log in, unless
+	// AdminGroup is, which lets its members in too.
 	AllowedGroup string
 	// AdminGroup, when set, makes members admins.
 	AdminGroup string
@@ -237,7 +238,10 @@ func (o *OIDCAuth) userFromClaims(claims map[string]any) (Identity, error) {
 		return Identity{}, &errOIDCDenied{fmt.Sprintf("Your account's %s (%q) can't be used as a username here.", o.UsernameClaim, rawName)}
 	}
 	groups := claimStrings(claims[o.GroupsClaim])
-	if o.AllowedGroup != "" && !containsFold(groups, o.AllowedGroup) {
+	admin := o.AdminGroup != "" && containsFold(groups, o.AdminGroup)
+	// The admins' group lets its members in too: an admin needn't be in
+	// the allowed group as well.
+	if o.AllowedGroup != "" && !containsFold(groups, o.AllowedGroup) && !admin {
 		return Identity{}, &errOIDCDenied{"Your account isn't allowed to use this service."}
 	}
 	user := User{Name: name, UID: o.DefaultUID, GID: o.DefaultGID}
@@ -252,7 +256,7 @@ func (o *OIDCAuth) userFromClaims(claims map[string]any) (Identity, error) {
 	if user.UID <= 0 || user.GID <= 0 {
 		return Identity{}, &errOIDCDenied{"Your account has no usable uid and gid."}
 	}
-	user.Admin = o.AdminGroup != "" && containsFold(groups, o.AdminGroup)
+	user.Admin = admin
 	return Identity{User: user, Groups: groups}, nil
 }
 
