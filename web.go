@@ -65,6 +65,7 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 		// covers says whether access c allows level p.
 		"covers":    func(c Caps, p Perm) bool { return c.Covers(p.Caps()) },
 		"humanSize": humanSize,
+		"add":       func(a, b int) int { return a + b },
 		// within shows a key or folder relative to the folder being browsed.
 		"within": func(prefix, key string) string { return strings.TrimPrefix(key, prefix) },
 		// folderName is a subfolder's name without its trailing slash.
@@ -206,6 +207,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/trash/restore", s.authed(s.admin(s.adminRestoreTrash)))
 	mux.HandleFunc("POST /admin/trash/purge", s.authed(s.admin(s.adminPurgeTrash)))
 	s.mirrorRoutes(mux)
+	s.serverRoutes(mux)
 	// API, for automation and scripts.
 	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
 	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
@@ -287,6 +289,10 @@ type page struct {
 	Mirrors    []MirrorView
 	Mirror     *MirrorView
 	MirrorForm *MirrorRequest
+	// Server mirrors: the list, one server's page, and the new-server form.
+	Servers    []ServerSummary
+	Server     *ServerView
+	ServerForm *ServerRequest
 	// AutoRefresh reloads the page every few seconds, while a mirror pass
 	// runs.
 	AutoRefresh bool
@@ -1152,6 +1158,7 @@ func (s *Server) adminCounts(r *http.Request, sess *Session, p *page) {
 		p.Trash = trash
 	}
 	p.Mirrors, _ = s.Portal.MirrorList(sess.User)
+	p.Servers, _ = s.Portal.ServerList(sess.User)
 }
 
 func (s *Server) adminRestoreTrash(w http.ResponseWriter, r *http.Request, sess *Session) {

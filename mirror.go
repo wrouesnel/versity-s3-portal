@@ -167,11 +167,19 @@ type Mirror struct {
 	Bucket string       `json:"bucket"`
 	Owner  string       `json:"owner"`
 	Source MirrorSource `json:"source"`
+	// Server is the server mirror (ServerMirror.ID) it was made from, if
+	// any.
+	Server string `json:"server,omitempty"`
 	// Every is "hourly", "daily", or "" for passes run by hand only.
 	Every string `json:"every,omitempty"`
 	// LimitMBps caps how fast passes read from the source, or 0.
 	LimitMBps int  `json:"limitMBps,omitempty"`
 	Paused    bool `json:"paused,omitempty"`
+	// Queued is a pass an admin asked for of many mirrors at once (a
+	// server's): "manual", "final" or "final-deep", by QueuedBy. The
+	// scheduler starts it when one of its maxMirrorJobs is free.
+	Queued   string `json:"queued,omitempty"`
+	QueuedBy string `json:"queuedBy,omitempty"`
 	// Account is the gateway account the mirror writes as: the owner's
 	// uid and gid, read & write on the bucket while it mirrors.
 	Account WebAccount `json:"account"`
@@ -304,6 +312,8 @@ type MirrorRequest struct {
 	Source    MirrorSource
 	Every     string
 	LimitMBps int
+	// Server, when set, is the server mirror it's made from.
+	Server string
 }
 
 func checkSource(s *MirrorSource) error {
@@ -423,7 +433,7 @@ func (p *Portal) RegisterMirror(ctx context.Context, admin User, req MirrorReque
 		return fmt.Errorf("create mirror account: %w", err)
 	}
 	m := &Mirror{
-		Bucket: req.Bucket, Owner: owner, Source: req.Source,
+		Bucket: req.Bucket, Owner: owner, Source: req.Source, Server: req.Server,
 		Every: req.Every, LimitMBps: req.LimitMBps, Account: acct, Found: found,
 	}
 	m.setState(MirrorRegistered, admin.Name, "From "+req.Source.Label()+". "+found)
@@ -766,9 +776,19 @@ func (p *Portal) RunMirrors(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// startDue starts scheduled passes that are due, up to maxMirrorJobs.
+// startDue starts queued passes, then scheduled passes that are due, up to
+// maxMirrorJobs.
 func (p *Portal) startDue(now time.Time) {
-	for bucket, m := range p.store.Mirrors() {
+	all := p.store.Mirrors()
+	for _, bucket := range sortedKeys(all) {
+		if m := all[bucket]; m.Queued != "" {
+			p.startQueued(bucket, m)
+		}
+	}
+	for bucket, m := range all {
+		if m.Queued != "" {
+			continue
+		}
 		if !m.syncing() || m.Paused {
 			continue
 		}
@@ -791,6 +811,30 @@ var (
 	errJobRunning = errors.New("a pass is already running")
 	errTooBusy    = errors.New("too many mirrors are copying")
 )
+
+// startQueued starts a mirror's queued pass if a job is free, or drops it
+// if the mirror's state no longer takes it.
+func (p *Portal) startQueued(bucket string, m *Mirror) {
+	final := strings.HasPrefix(m.Queued, "final")
+	if (final && m.State != MirrorFreezing) || (!final && !m.syncing()) {
+		_ = p.updateMirror(bucket, func(m *Mirror) error { m.Queued, m.QueuedBy = "", ""; return nil })
+		return
+	}
+	p.mirrors.mu.Lock()
+	_, running := p.mirrors.jobs[bucket]
+	busy := len(p.mirrors.jobs) >= maxMirrorJobs
+	p.mirrors.mu.Unlock()
+	if running || busy {
+		return
+	}
+	kind, by := m.Queued, m.QueuedBy
+	if err := p.updateMirror(bucket, func(m *Mirror) error { m.Queued, m.QueuedBy = "", ""; return nil }); err != nil {
+		return
+	}
+	if err := p.startJob(bucket, kind, by); err != nil {
+		slog.Debug("queued mirror pass not started", "bucket", bucket, "err", err)
+	}
+}
 
 // startJob runs a pass, or a final pass and its checks, in the background.
 func (p *Portal) startJob(bucket, kind, by string) error {

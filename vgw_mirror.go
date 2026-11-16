@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -237,4 +239,41 @@ func (v *VGW) BucketFeatures(ctx context.Context, bucket string) (versioning, ob
 		objectLock = "Off"
 	}
 	return versioning, objectLock
+}
+
+// SourceBuckets lists the buckets the key may see, with S3's ListBuckets
+// (s3:ListAllMyBuckets), page by page: a server mirror's source.
+func (v *VGW) SourceBuckets(ctx context.Context) ([]string, error) {
+	var out []string
+	token := ""
+	for range 1000 {
+		q := url.Values{"max-buckets": {"1000"}}
+		if token != "" {
+			q.Set("continuation-token", token)
+		}
+		body, err := v.do(ctx, http.MethodGet, v.S3Endpoint, "/", q, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Buckets struct {
+				Bucket []struct {
+					Name string `xml:"Name"`
+				} `xml:"Bucket"`
+			} `xml:"Buckets"`
+			ContinuationToken string `xml:"ContinuationToken"`
+		}
+		if err := xml.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("parse the bucket list: %w", err)
+		}
+		for _, b := range result.Buckets.Bucket {
+			out = append(out, b.Name)
+		}
+		if result.ContinuationToken == "" || result.ContinuationToken == token {
+			sort.Strings(out)
+			return out, nil
+		}
+		token = result.ContinuationToken
+	}
+	return nil, errors.New("the bucket list goes on for more than a million buckets")
 }

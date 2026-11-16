@@ -304,6 +304,11 @@ th[aria-sort=descending]::after { content: " ▼"; font-size: .65em; }
 .subpane .card-head { margin-bottom: 4px; }
 .subpane section.danger-zone { margin-top: 0; }
 input.table-filter { max-width: 280px; margin: 4px 0 8px; padding: 3px 8px; }
+/* Inputs in a table's cells (the server mirror's review table): one line high. */
+table.files input.cell-input { margin: 0; padding: 3px 8px; min-width: 14em; }
+table.files td select { margin: 0; }
+.server-actions { flex-wrap: wrap; gap: 6px; margin: 8px 0 16px; }
+.server-actions form { margin: 0; }
 @media (max-width: 800px) {
   .subsplit { grid-template-columns: 1fr; gap: 12px; }
   .subnav { position: static; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 0; }

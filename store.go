@@ -106,6 +106,8 @@ type state struct {
 	// Mirrors are buckets being copied in from another S3 service, and
 	// the record of ones that were, by bucket.
 	Mirrors map[string]*Mirror `json:"mirrors,omitempty"`
+	// Servers are whole S3 servers whose buckets are mirrored in, by ID.
+	Servers map[string]*ServerMirror `json:"servers,omitempty"`
 }
 
 // Store is a JSON file of the portal's state. Each method is safe to call
@@ -150,6 +152,9 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if st.Mirrors == nil {
 		st.Mirrors = map[string]*Mirror{}
+	}
+	if st.Servers == nil {
+		st.Servers = map[string]*ServerMirror{}
 	}
 	return s, nil
 }
@@ -449,6 +454,47 @@ func (s *Store) Mirrors() map[string]*Mirror {
 	out := make(map[string]*Mirror, len(s.state.Mirrors))
 	for b, m := range s.state.Mirrors {
 		out[b] = m.clone()
+	}
+	return out
+}
+
+// ---------------------------------------------------------------- servers
+
+// Server returns a server mirror's record, if there is one.
+func (s *Store) Server(id string) (*ServerMirror, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sm, ok := s.state.Servers[id]
+	if !ok {
+		return nil, false
+	}
+	c := *sm
+	return &c, true
+}
+
+func (s *Store) PutServer(sm *ServerMirror) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := *sm
+	s.state.Servers[sm.ID] = &c
+	return s.save()
+}
+
+func (s *Store) DeleteServer(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.state.Servers, id)
+	return s.save()
+}
+
+// Servers returns every server mirror's record, by ID.
+func (s *Store) Servers() map[string]*ServerMirror {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]*ServerMirror, len(s.state.Servers))
+	for id, sm := range s.state.Servers {
+		c := *sm
+		out[id] = &c
 	}
 	return out
 }

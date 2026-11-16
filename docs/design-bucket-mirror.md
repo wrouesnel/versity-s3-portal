@@ -348,3 +348,45 @@ Tested against versitygw 1.10.0 as the target, and versitygw and a MinIO
 server built from source as sources. The MinIO test covers keys needing
 URL encoding, a multipart-uploaded source object, and `a-b` sorting
 before `a/b`.
+
+## Server mirrors
+
+Status: built. An admin moving a whole S3 service (a MinIO server) would
+otherwise register each bucket by hand. A **server mirror** lists the
+service's buckets and makes a mirror of each one picked. Each is then an
+ordinary mirror, with every step and check above.
+
+- **Registering.** The form takes the service's endpoint, region,
+  addressing and key, a name for it, the default owner of the buckets
+  made, and the schedule. The key is checked by listing the buckets (S3's
+  ListBuckets, paged), so it needs `s3:ListAllMyBuckets` as well as reading
+  each bucket. Nothing is mirrored yet.
+- **The review table.** The server's page lists the service's buckets not
+  yet mirrored from it, every time it's opened:
+
+  | The name here | Ticked | What happens |
+  |---|---|---|
+  | no bucket has it | yes | a new bucket, for the default owner, or the one picked |
+  | an empty bucket owned by someone the portal knows | yes | that bucket is used as it is, and keeps its owner |
+  | a bucket with things in it, or one another mirror copies into | no | give it another name here, or leave it |
+  | not a valid bucket name here (`Legacy_Data`) | no | a valid one is offered (`legacy-data`) |
+  | another mirror copies this source bucket already | can't be | shown, for the record |
+
+  Ticked rows are registered one by one, as single mirrors are, each source
+  checked first. One that fails is left out, with why; the others go ahead.
+- **Acting on them all.** The server's page runs a pass of each, pauses or
+  resumes them, freezes them, completes the verified ones, and replaces the
+  key for the server and every mirror still running. A freeze is the
+  admin's word that the whole service has stopped taking writes; a mirror
+  whose first pass hasn't run is left out of it, saying so.
+- **Queued passes.** A pass asked for of many mirrors at once is queued on
+  each (`Mirror.Queued`), not started: the scheduler starts queued passes
+  first, at most two running at a time (`maxMirrorJobs`), as it does
+  scheduled ones. A queued pass is dropped if its mirror's state no longer
+  takes it (a manual pass of a mirror since frozen).
+- **State.** The server's record (`Servers` in the store) keeps the endpoint
+  and key; each mirror keeps its own copy of the key, and its server's ID.
+  The record, and its key, is forgotten by hand once every mirror from it
+  is complete or abandoned. The mirrors' records stay.
+- **Not built:** reading owners from the source's IAM. Each bucket's owner
+  is the default, or whom the admin picks for it.

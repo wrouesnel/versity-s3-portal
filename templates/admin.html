@@ -7,7 +7,7 @@
         <li><a class="section" href="/admin?section=people"{{if eq .Section "people"}} aria-current="page"{{end}}>People <span class="count">{{len .People}}</span></a></li>
         <li><a class="section" href="/admin?section=buckets"{{if eq .Section "buckets"}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
         <li><a class="section" href="/admin?section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys <span class="count">{{len .AllKeys}}</span></a></li>
-        <li><a class="section" href="/admin?section=mirrors"{{if or (eq .Section "mirrors") (eq .Section "mirror") (eq .Section "mirror-new")}} aria-current="page"{{end}}>Mirrors <span class="count">{{len .Mirrors}}</span></a></li>
+        <li><a class="section" href="/admin?section=mirrors"{{if or (eq .Section "mirrors") (eq .Section "mirror") (eq .Section "mirror-new") (eq .Section "server") (eq .Section "server-new")}} aria-current="page"{{end}}>Mirrors <span class="count">{{len .Mirrors}}</span></a></li>
         {{if .ZFS}}<li><a class="section" href="/admin?section=trash"{{if eq .Section "trash"}} aria-current="page"{{end}}>Deleted buckets <span class="count">{{len .Trash}}</span></a></li>{{end}}
       </ul>
       <h2>Emergencies</h2>
@@ -121,17 +121,37 @@
     {{end}}
 
     {{else if eq .Section "mirrors"}}
-    <div class="pane-head"><h1>Mirrors</h1><a class="button" href="/admin/mirrors/new">New mirror</a></div>
-    <p class="muted small">A mirror copies a bucket on another S3 service into a bucket here, on a schedule, while the bucket stays read only. When you're ready to move, stop writes to the source and freeze the mirror: a final pass copies the last changes and checks the two buckets match. Then complete it to open the bucket to its users.</p>
+    <div class="pane-head"><h1>Mirrors</h1><span class="row"><a class="button ghost" href="/admin/servers/new">Mirror a server</a> <a class="button" href="/admin/mirrors/new">New mirror</a></span></div>
+    <p class="muted small">A mirror copies a bucket on another S3 service into a bucket here, on a schedule, while the bucket stays read only. When you're ready to move, stop writes to the source and freeze the mirror: a final pass copies the last changes and checks the two buckets match. Then complete it to open the bucket to its users. <strong>Mirror a server</strong> lists every bucket on another service and makes a mirror for each one you pick.</p>
+    {{if .Servers}}
+    <h2>Servers</h2>
+    <div class="table-scroll">
+    <table class="files" id="admin-servers">
+      <thead><tr><th data-sort="text">Server</th><th data-sort="text">Endpoint</th><th data-sort="num">Buckets</th><th>Progress</th></tr></thead>
+      <tbody>
+      {{range .Servers}}
+      <tr>
+        <td><a class="bucket" href="/admin/server?id={{.ID}}">{{.Name}}</a></td>
+        <td class="small"><code>{{.Endpoint}}</code></td>
+        <td class="num">{{.Buckets}}</td>
+        <td class="small">{{if .Active}}{{.Active}} mirroring{{end}}{{if .Verified}}, <span class="pill ok">{{.Verified}} verified</span>{{end}}{{if .Done}}{{if .Active}}, {{end}}{{.Done}} done{{end}}{{if not .Buckets}}<span class="muted">no buckets picked yet</span>{{end}}</td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    </div>
+    <h2>Buckets</h2>
+    {{end}}
     {{if .Mirrors}}
     <div class="table-scroll">
     <table class="files" id="admin-mirrors">
-      <thead><tr><th data-sort="text">Bucket</th><th data-sort="text">Source</th><th data-sort="text">Owner</th><th data-sort="text">State</th><th>Last pass</th></tr></thead>
+      <thead><tr><th data-sort="text">Bucket</th><th data-sort="text">Source</th>{{if $.Servers}}<th data-sort="text">From</th>{{end}}<th data-sort="text">Owner</th><th data-sort="text">State</th><th>Last pass</th></tr></thead>
       <tbody>
       {{range .Mirrors}}
       <tr>
         <td><a class="bucket" href="/admin/mirror?bucket={{.Bucket}}">{{.Bucket}}</a></td>
         <td class="small"><code>{{.Source.Label}}</code></td>
+        {{if $.Servers}}<td class="small">{{if .Server}}{{$id := .Server}}{{range $.Servers}}{{if eq .ID $id}}<a href="/admin/server?id={{.ID}}">{{.Name}}</a>{{end}}{{end}}{{else}}<span class="muted">one bucket</span>{{end}}</td>{{end}}
         <td>{{.Owner}}</td>
         <td>{{template "mirrorState" .}}</td>
         <td class="small">{{if .Running}}<span class="pill readwrite">running</span> {{.Running.Phase}}: {{.Running.Copied}} copied{{else}}{{with .LastPass}}{{.Finished.Local.Format "2 Jan 15:04"}}: {{.Changes}} changes{{if .Failed}}, <span class="pill warn">{{.Failed}} failed</span>{{end}}{{if .Error}} <span class="pill warn">stopped</span>{{end}}{{else}}<span class="muted">none yet</span>{{end}}{{end}}</td>
@@ -191,6 +211,52 @@
 
     {{else if eq .Section "mirror"}}
     {{template "mirrorPage" .}}
+
+    {{else if eq .Section "server-new"}}
+    <div class="pane-head"><nav class="crumbs" aria-label="Mirrors"><a href="/admin?section=mirrors">Mirrors</a><span class="sep">/</span><a href="/admin/servers/new" aria-current="page">Mirror a server</a></nav></div>
+    {{with .ServerForm}}
+    <form method="post" action="/admin/servers" class="mirror-form" autocomplete="off">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <h2>The server</h2>
+      <label>Name it <input name="name" value="{{.Name}}" required placeholder="old MinIO"></label>
+      <label>Endpoint <input name="endpoint" value="{{.Source.Endpoint}}" required placeholder="https://minio.example.com"></label>
+      <div class="field-row">
+        <label>Region <input name="region" value="{{.Source.Region}}" placeholder="us-east-1"></label>
+      </div>
+      <fieldset class="choices"><legend>Addressing</legend>
+        <label class="check"><input type="radio" name="addressing" value="path"{{if not .Source.Virtual}} checked{{end}}> Path style (<code>host/bucket</code>), as MinIO uses</label>
+        <label class="check"><input type="radio" name="addressing" value="virtual"{{if .Source.Virtual}} checked{{end}}> Virtual-hosted (<code>bucket.host</code>)</label>
+      </fieldset>
+      <div class="field-row">
+        <label>Access key ID <input name="access" value="{{.Source.Access}}" required></label>
+        <label>Secret <input name="secret" type="password" required autocomplete="new-password"></label>
+      </div>
+      <p class="muted small">Use a key that can list every bucket (<code>s3:ListAllMyBuckets</code>) and read them, and nothing more. It's kept until every mirror from the server is complete or abandoned, never shown again, and nothing is ever written to the source.</p>
+      <h2>Buckets made here</h2>
+      <label>Owner, unless you pick another for a bucket
+        <select name="owner" required>
+          {{$o := .DefaultOwner}}{{range $.People}}<option value="{{.User}}"{{if eq .User $o}} selected{{end}}>{{.User}}</option>{{end}}
+        </select>
+      </label>
+      <p class="muted small">Files are written as each bucket's owner. Every bucket is read only, its owner's too, until its move is complete.</p>
+      <h2>Passes</h2>
+      <div class="field-row">
+        <label>Run
+          <select name="every">
+            <option value="hourly"{{if eq .Every "hourly"}} selected{{end}}>hourly</option>
+            <option value="daily"{{if eq .Every "daily"}} selected{{end}}>daily</option>
+            <option value=""{{if eq .Every ""}} selected{{end}}>only by hand</option>
+          </select>
+        </label>
+        <label>Speed limit per bucket, MB/s <input name="limit" type="number" min="0" value="{{.LimitMBps}}" placeholder="0 for none"></label>
+      </div>
+      <p class="muted small">Next, the server's buckets are listed, and you pick which to mirror and who owns each. Nothing is made until then. At most two mirrors run a pass at once, whatever the number of buckets.</p>
+      <p><button>List the server's buckets</button> <a class="button ghost" href="/admin?section=mirrors">Cancel</a></p>
+    </form>
+    {{end}}
+
+    {{else if eq .Section "server"}}
+    {{template "serverPage" .}}
 
     {{else if eq .Section "revoke"}}
     <div class="pane-head"><h1>Revoke every key</h1></div>
@@ -264,7 +330,7 @@
 </div>
 {{template "footer" .}}
 
-{{define "mirrorState"}}<span class="pill{{if or (eq .State "synced") (eq .State "verified") (eq .State "complete") (eq .State "source-removed")}} ok{{else if eq .State "abandoned"}}{{else if eq .State "freezing"}} write{{end}}">{{.State.Label}}</span>{{if .Paused}} <span class="pill">paused</span>{{end}}{{end}}
+{{define "mirrorState"}}<span class="pill{{if or (eq .State "synced") (eq .State "verified") (eq .State "complete") (eq .State "source-removed")}} ok{{else if eq .State "abandoned"}}{{else if eq .State "freezing"}} write{{end}}">{{.State.Label}}</span>{{if .Paused}} <span class="pill">paused</span>{{end}}{{if .Queued}} <span class="pill">{{if eq .Queued "manual"}}pass{{else}}final pass{{end}} queued</span>{{end}}{{end}}
 
 {{define "verification"}}
 <dl class="verification">
@@ -439,5 +505,104 @@
   </tbody>
 </table>
 </div>
+{{end}}
+{{end}}{{end}}
+
+{{define "serverPage"}}{{with .Server}}{{$sv := .}}
+<div class="pane-head"><nav class="crumbs" aria-label="Mirrors"><a href="/admin?section=mirrors">Mirrors</a><span class="sep">/</span><a href="/admin/server?id={{.ID}}" aria-current="page">{{.Name}}</a></nav></div>
+<p class="small"><code>{{.Source.Endpoint}}</code>{{if .Source.Virtual}}, virtual-hosted{{end}}, region {{.Source.Region}}. Key <code>{{.Source.Access}}</code>{{if not .HasSecret}} <span class="pill warn">secret forgotten</span>{{end}}. New buckets are {{.DefaultOwner}}'s; passes run {{if .Every}}{{.Every}}{{else}}only by hand{{end}}{{if .LimitMBps}}, at most {{.LimitMBps}} MB/s each{{end}}.</p>
+<p class="small">{{len .Mirrors}} {{if eq (len .Mirrors) 1}}bucket{{else}}buckets{{end}} mirrored:
+  {{if .Syncing}}<span class="pill readwrite">{{.Syncing}} syncing</span> {{end}}
+  {{if .Synced}}<span class="pill ok">{{.Synced}} synced</span> {{end}}
+  {{if .Freezing}}<span class="pill write">{{.Freezing}} freezing</span> {{end}}
+  {{if .Verified}}<span class="pill ok">{{.Verified}} verified</span> {{end}}
+  {{if .Done}}<span class="pill">{{.Done}} done</span>{{end}}
+</p>
+
+{{if .Mirrors}}
+<div class="row server-actions">
+  <form method="post" action="/admin/server/run"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="ghost small"{{if not (or .Syncing .Synced)}} disabled{{end}}>Run a pass of each</button></form>
+  <form method="post" action="/admin/server/pause"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="paused" value="on"><button class="ghost small"{{if not .Active}} disabled{{end}}>Pause all</button></form>
+  <form method="post" action="/admin/server/pause"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="ghost small"{{if not .Active}} disabled{{end}}>Resume all</button></form>
+  <details class="menu">
+    <summary class="button small{{if not (or .Syncing .Synced .Freezing)}} disabled{{end}}">Freeze all…</summary>
+    <div class="pop">
+      <form method="post" action="/admin/server/freeze">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+        <p class="small">Each mirror runs its final pass and checks. Stop every write to the server first: a read-only policy for all its users, revoking its keys, or blocking clients at the network.</p>
+        <label class="check"><input type="checkbox" name="stopped" required> Writes to every bucket on {{.Name}} have stopped</label>
+        <label class="check"><input type="checkbox" name="deep"> Deep check: read back what can't be checked by its ETag</label>
+        <button>Freeze {{add .Syncing .Synced}} and run the final passes</button>
+      </form>
+    </div>
+  </details>
+  <form method="post" action="/admin/server/complete" data-confirm="Open the {{.Verified}} verified buckets to their users, and forget their source key?"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="small"{{if not .Verified}} disabled{{end}}>Complete {{.Verified}} verified</button></form>
+  <details class="menu">
+    <summary class="button ghost small">Replace the key…</summary>
+    <div class="pop">
+      <form method="post" action="/admin/server/key" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+        <label>Access key ID <input name="access" value="{{.Source.Access}}" required></label>
+        <label>Secret <input name="secret" type="password" required autocomplete="new-password"></label>
+        <button>Use it for every mirror still running</button>
+      </form>
+    </div>
+  </details>
+</div>
+
+<h2>Mirrored</h2>
+<div class="table-scroll">
+<table class="files" id="server-mirrors">
+  <thead><tr><th data-sort="text">Bucket here</th><th data-sort="text">On the server</th><th data-sort="text">Owner</th><th data-sort="text">State</th><th>Last pass</th></tr></thead>
+  <tbody>
+  {{range .Mirrors}}
+  <tr>
+    <td><a class="bucket" href="/admin/mirror?bucket={{.Bucket}}">{{.Bucket}}</a></td>
+    <td class="small"><code>{{.Source.Bucket}}</code></td>
+    <td>{{.Owner}}</td>
+    <td>{{template "mirrorState" .}}</td>
+    <td class="small">{{if .Running}}<span class="pill readwrite">running</span> {{.Running.Phase}}: {{.Running.Copied}} copied{{else}}{{with .LastPass}}{{.Finished.Local.Format "2 Jan 15:04"}}: {{.Changes}} changes{{if .Failed}}, <span class="pill warn">{{.Failed}} failed</span>{{end}}{{if .Error}} <span class="pill warn">stopped</span>{{end}}{{else}}<span class="muted">waiting its turn</span>{{end}}{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
+
+<div class="pane-head"><h2>On the server, not mirrored yet</h2><a class="button ghost small" href="/admin/server?id={{.ID}}">List again</a></div>
+{{if .ListError}}
+<p class="flash error" role="alert">Couldn't list the server's buckets: {{.ListError}}</p>
+{{else if .Rows}}
+<p class="muted small">Listed {{.Listed.Local.Format "15:04:05"}}. Tick the buckets to mirror, and change a bucket's name here or its owner if you need to. A name already taken here by a bucket with things in it is left unticked: give it another name, or leave it.</p>
+<form method="post" action="/admin/server/create">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+  <div class="table-scroll">
+  <table class="files" id="server-rows">
+    <thead><tr><th><input type="checkbox" class="select-all" aria-label="Tick every bucket" data-select-all="pick"></th><th data-sort="text">On the server</th><th>Bucket here</th><th>Owner</th><th>Notes</th></tr></thead>
+    <tbody>
+    {{range $i, $r := .Rows}}
+    <tr{{if not $r.Include}} class="muted"{{end}}>
+      <td><input type="checkbox" name="pick" value="{{$i}}"{{if $r.Include}} checked{{end}}{{if eq $r.Status "elsewhere"}} disabled{{end}} aria-label="Mirror {{$r.Source}}"></td>
+      <td><code>{{$r.Source}}</code><input type="hidden" name="source-{{$i}}" value="{{$r.Source}}"></td>
+      <td><input name="local-{{$i}}" value="{{$r.Local}}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]" aria-label="Its name here" class="cell-input"{{if eq $r.Status "elsewhere"}} disabled{{end}}></td>
+      <td>{{if eq $r.Status "exists-empty"}}{{$r.Owner}}<input type="hidden" name="owner-{{$i}}" value="">{{else}}<select name="owner-{{$i}}" aria-label="Its owner here"{{if eq $r.Status "elsewhere"}} disabled{{end}}>{{range $.People}}<option value="{{.User}}"{{if eq .User $r.Owner}} selected{{end}}>{{.User}}</option>{{end}}</select>{{end}}</td>
+      <td class="small">{{if eq $r.Status "ready"}}<span class="pill ok">new</span>{{else if eq $r.Status "exists-empty"}}<span class="pill">empty here</span>{{else if eq $r.Status "elsewhere"}}<span class="pill">mirrored</span>{{else}}<span class="pill warn">{{if eq $r.Status "clash"}}name taken{{else}}bad name{{end}}</span>{{end}} {{$r.Note}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  <p><button>Mirror the ticked buckets</button></p>
+  <p class="muted small">Each one's source is checked first, as for a single mirror: it's listed, and an object read. One that fails is left out, saying why; the others go ahead.</p>
+</form>
+{{else}}
+<p class="empty">Every bucket on the server is mirrored.</p>
+{{end}}
+
+{{if and (not .Active) .Mirrors}}
+<section class="danger-zone">
+  <p>Every mirror from {{.Name}} is complete or abandoned. Forgetting the server deletes its key; the mirrors' records stay.</p>
+  <form method="post" action="/admin/server/forget" data-confirm="Forget {{.Name}} and its key?"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="danger">Forget the server</button></form>
+</section>
 {{end}}
 {{end}}{{end}}

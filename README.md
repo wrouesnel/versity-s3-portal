@@ -222,6 +222,19 @@ they pick.
   - **What it doesn't do:** it never writes to the source, and nothing
     else is carried over (versions, tags, ACLs, policies, the source's
     keys).
+  - **Server mirrors:** "Mirror a server" takes another S3 service's
+    endpoint and a read-only key that may list every bucket
+    (`s3:ListAllMyBuckets`), and lists its buckets. Admins tick which to
+    mirror, and check each one's name and owner here: new buckets go to a
+    default owner unless another is picked. A name already taken here by a
+    bucket with things in it, or one that can't be a bucket name here, is
+    left unticked, to be given another name; an empty bucket here of the name
+    is used as it is. Each ticked bucket becomes a mirror of its own, as
+    above. The server's page acts on them all at once: a pass of each,
+    pause and resume, freeze (on the admin's word that the whole server has
+    stopped taking writes), complete the verified ones, and replace the key.
+    Passes asked for at once are queued, two running at a time. Listing the
+    server again finds buckets made there since.
   - See `docs/design-bucket-mirror.md`.
 - **State:** `STATE_FILE` is a JSON file with each key's owner, name and
   grants, bucket group grants, everyone the portal knows, sessions, web
