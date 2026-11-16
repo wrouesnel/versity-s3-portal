@@ -28,6 +28,27 @@ they pick.
     `groupWithSearchCapability` group, and group DNs look like
     `ou=<group>,ou=groups,<base DN>`. Users need a `uid`
     attribute, which glauth 2.3 emits only with `nameformat = "uid"`.
+- **Active Directory** (`LDAP_SCHEMA=ad`): the same search-then-bind, on
+  AD's own schema.
+  - People are found by `sAMAccountName`
+    (`(&(objectCategory=person)(objectClass=user)(sAMAccountName=<user>))`),
+    without case: `Alice` logs in as `alice`.
+  - `ALLOWED_GROUP_DN` and `ADMIN_GROUP_DN` count nested groups (AD's
+    `LDAP_MATCHING_RULE_IN_CHAIN`), so a site's own groups can be made
+    members of them. The groups shown for grants are the person's direct
+    `memberOf`.
+  - Their uid and gid are their `uidNumber` and `gidNumber` where AD has
+    them (its RFC 2307 attributes). Otherwise, with `LDAP_ID_RANGE_BASE`,
+    the base plus their RID (the last part of their `objectSid`) and their
+    primary group's, as sssd's ID mapping gives a domain a range: unique
+    per person in one domain. Otherwise `LDAP_DEFAULT_UID`/`GID`, one
+    service user for everyone, as with OIDC.
+  - A person is disabled when their account is disabled
+    (`userAccountControl`), locked out (`msDS-User-Account-Control-Computed`,
+    which AD works out from its lockout policy), or past `accountExpires`.
+  - Groups to suggest are `(objectClass=group)`.
+  - The search account needs only to read users and groups: any domain
+    user can. Bind as its DN or `name@domain`.
 - **OIDC login** (optional, alongside or instead of LDAP): the
   authorization code flow with PKCE, a nonce, and a signed short-lived cookie
   holding the flow's state.
@@ -236,7 +257,10 @@ they pick.
 | `LDAP_BIND_DN`, `LDAP_BIND_PASSWORD` | The search account (or `LDAP_BIND_PASSWORD_FILE`) |
 | `ALLOWED_GROUP_DN` | Only users with this group in `memberOf` may log in (default: anyone in the directory) |
 | `ADMIN_GROUP_DN` | Users with this group in `memberOf` are admins (default: nobody) |
-| `LDAP_GROUP_FILTER` | Finds groups to suggest for grants (default `(objectClass=posixGroup)`) |
+| `LDAP_GROUP_FILTER` | Finds groups to suggest for grants (default `(objectClass=posixGroup)`, or `(objectClass=group)` for AD) |
+| `LDAP_SCHEMA` | `posix` (default: glauth, OpenLDAP, 389-ds) or `ad` (Active Directory); see above |
+| `LDAP_ID_RANGE_BASE` | With `ad`, an account without `uidNumber` is uid base+RID, gid base+primary group's RID, e.g. `200000` |
+| `LDAP_DEFAULT_UID`, `LDAP_DEFAULT_GID` | With `ad`, the uid and gid of an account given no others (not 0) |
 | `DIRECTORY_POLL_INTERVAL` | How often to check people against LDAP (default `5m`, at least `10s`) |
 | `ZFS_HELPER_SOCKET` | The `s3-zfs-helper` socket, e.g. `/run/s3-zfs-helper/helper.sock`; turns on ZFS datasets per bucket |
 | `ZFS_DEFAULT_QUOTA` | Size limit for new buckets, e.g. `500G` (default: none) |
@@ -314,7 +338,10 @@ go test ./...
 ```
 
 `TestLDAPAuthIntegration` drives a real LDAP server when the `LDAP_TEST_*`
-variables described in `ldap_integration_test.go` are set.
+variables described in `ldap_integration_test.go` are set, and
+`TestADIntegration` an AD domain controller (or Samba's) with the
+`AD_TEST_*` variables described in `ad_integration_test.go`: nested groups,
+a disabled account, and IDs mapped from SIDs.
 
 `TestZFSAgainstGateway` runs the real `s3-zfs-helper` over its socket with
 a fake `zfs` whose datasets are directories in the gateway's root, so it

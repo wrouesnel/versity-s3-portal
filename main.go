@@ -87,6 +87,25 @@ func run() error {
 			AllowedGroup: os.Getenv("ALLOWED_GROUP_DN"),
 			AdminGroup:   os.Getenv("ADMIN_GROUP_DN"),
 			GroupFilter:  os.Getenv("LDAP_GROUP_FILTER"),
+			Schema:       env("LDAP_SCHEMA", SchemaPosix),
+		}
+		var err1, err2, err3 error
+		ldapAuth.IDRangeBase, err1 = optInt("LDAP_ID_RANGE_BASE")
+		ldapAuth.DefaultUID, err2 = optInt("LDAP_DEFAULT_UID")
+		ldapAuth.DefaultGID, err3 = optInt("LDAP_DEFAULT_GID")
+		missing = append(missing, err1, err2, err3)
+		switch ldapAuth.Schema {
+		case SchemaPosix:
+			if ldapAuth.IDRangeBase != 0 || ldapAuth.DefaultUID != 0 || ldapAuth.DefaultGID != 0 {
+				missing = append(missing, errors.New("LDAP_ID_RANGE_BASE and LDAP_DEFAULT_UID/GID are for LDAP_SCHEMA=ad: a posix directory gives every account its ids"))
+			}
+		case SchemaAD:
+			if ldapAuth.IDRangeBase < 0 || ldapAuth.DefaultUID < 0 || ldapAuth.DefaultGID < 0 ||
+				(ldapAuth.DefaultUID == 0) != (ldapAuth.DefaultGID == 0) {
+				missing = append(missing, errors.New("LDAP_DEFAULT_UID and LDAP_DEFAULT_GID are given together, and not 0; LDAP_ID_RANGE_BASE is positive"))
+			}
+		default:
+			missing = append(missing, fmt.Errorf("LDAP_SCHEMA must be %s or %s", SchemaPosix, SchemaAD))
 		}
 		auth = ldapAuth
 	}

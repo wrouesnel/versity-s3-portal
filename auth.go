@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -63,9 +64,26 @@ type Directory interface {
 	Groups() ([]string, error)
 }
 
+// LDAP schemas: how a directory names people, their groups and their ids.
+const (
+	// SchemaPosix is RFC 2307's, as glauth, OpenLDAP and 389-ds serve it:
+	// posixAccount entries named by uid, with uidNumber and gidNumber.
+	SchemaPosix = "posix"
+	// SchemaAD is Active Directory's: user entries named by
+	// sAMAccountName, nested groups, and userAccountControl.
+	SchemaAD = "ad"
+)
+
+// adInChain is AD's LDAP_MATCHING_RULE_IN_CHAIN: memberOf matched through
+// nested groups.
+const adInChain = "1.2.840.113556.1.4.1941"
+
 // LDAPAuth finds the user with a search account, then binds as them to check
-// their password. Their uid and gid come from the directory's posixAccount
-// attributes, which is what glauth serves.
+// their password. With the posix schema their uid and gid come from the
+// directory's posixAccount attributes, which is what glauth serves. With the
+// ad schema, from uidNumber and gidNumber where AD has them (its RFC 2307
+// attributes), else IDRangeBase plus the account's RID and its primary
+// group's, else DefaultUID and DefaultGID.
 type LDAPAuth struct {
 	URL          string
 	ServerName   string
@@ -77,10 +95,66 @@ type LDAPAuth struct {
 	AllowedGroup string
 	// AdminGroup, when set, is the group DN that makes users admins.
 	AdminGroup string
-	// GroupFilter finds group entries for Groups (default posixGroup).
+	// GroupFilter finds group entries for Groups (default posixGroup, or
+	// AD's group).
 	GroupFilter string
+	// Schema is SchemaPosix (default) or SchemaAD.
+	Schema string
+	// IDRangeBase, with the ad schema, gives an account without uidNumber
+	// the uid IDRangeBase+RID (its objectSid's last part) and the gid
+	// IDRangeBase+primaryGroupID, as sssd's ID mapping does with a range of
+	// its own: unique within one domain.
+	IDRangeBase int
+	// DefaultUID and DefaultGID are those of an account the directory gives
+	// no ids for (with the ad schema): every file of theirs then belongs to
+	// one service user.
+	DefaultUID, DefaultGID int
 
 	now func() time.Time
+}
+
+func (a *LDAPAuth) ad() bool { return a.Schema == SchemaAD }
+
+// nameAttr is the attribute a person's username is.
+func (a *LDAPAuth) nameAttr() string {
+	if a.ad() {
+		return "sAMAccountName"
+	}
+	return "uid"
+}
+
+// attrs are those read for every person.
+func (a *LDAPAuth) attrs() []string {
+	if a.ad() {
+		return adUserAttrs
+	}
+	return userAttrs
+}
+
+// usersFilter matches every person's account entry.
+func (a *LDAPAuth) usersFilter() string {
+	if a.ad() {
+		return "(&(objectCategory=person)(objectClass=user))"
+	}
+	return "(objectClass=posixAccount)"
+}
+
+// filterFor matches username's account entry, whether or not they may use
+// the service.
+func (a *LDAPAuth) filterFor(username string) string {
+	if a.ad() {
+		return fmt.Sprintf("(&(objectCategory=person)(objectClass=user)(sAMAccountName=%s))", ldap.EscapeFilter(username))
+	}
+	return userFilter(username)
+}
+
+// normalize is the username as the portal knows it: AD's are matched
+// without case, so they are lowercased.
+func (a *LDAPAuth) normalize(username string) string {
+	if a.ad() {
+		return strings.ToLower(username)
+	}
+	return username
 }
 
 // userAttrs are read for every person: ids, groups, and the attributes
@@ -88,6 +162,14 @@ type LDAPAuth struct {
 var userAttrs = []string{
 	"uid", "uidNumber", "gidNumber", "memberOf",
 	"accountStatus", "nsAccountLock", "pwdAccountLockedTime", "shadowExpire",
+}
+
+// adUserAttrs are AD's: its ids where it has them (RFC 2307), the SID and
+// primary group for ID mapping, groups, and what marks an account disabled,
+// expired or locked out.
+var adUserAttrs = []string{
+	"sAMAccountName", "uidNumber", "gidNumber", "objectSid", "primaryGroupID", "memberOf",
+	"userAccountControl", "accountExpires", "msDS-User-Account-Control-Computed",
 }
 
 // userFilter matches the user's account entry, whether or not they may
@@ -126,7 +208,7 @@ func (a *LDAPAuth) dial() (*ldap.Conn, error) {
 func (a *LDAPAuth) find(conn *ldap.Conn, username string) (*ldap.Entry, error) {
 	result, err := conn.Search(ldap.NewSearchRequest(
 		a.BaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 2, 10, false,
-		userFilter(username), userAttrs, nil,
+		a.filterFor(username), a.attrs(), nil,
 	))
 	if err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultSizeLimitExceeded) {
 		return nil, fmt.Errorf("LDAP search: %w", err)
@@ -141,6 +223,7 @@ func (a *LDAPAuth) find(conn *ldap.Conn, username string) (*ldap.Entry, error) {
 }
 
 func (a *LDAPAuth) Authenticate(username, password string) (Identity, error) {
+	username = a.normalize(username)
 	if !usernameRe.MatchString(username) || password == "" {
 		return Identity{}, ErrBadCredentials
 	}
@@ -156,10 +239,10 @@ func (a *LDAPAuth) Authenticate(username, password string) (Identity, error) {
 	if entry == nil {
 		return Identity{}, ErrBadCredentials
 	}
-	if entry.GetAttributeValue("uid") != username {
+	if a.normalize(entry.GetAttributeValue(a.nameAttr())) != username {
 		return Identity{}, fmt.Errorf("LDAP returned %q for %s", entry.DN, username)
 	}
-	d, err := a.entry(entry)
+	d, err := a.entry(entry, a.memberOf(conn, entry))
 	if err != nil {
 		return Identity{}, err
 	}
@@ -177,6 +260,7 @@ func (a *LDAPAuth) Authenticate(username, password string) (Identity, error) {
 }
 
 func (a *LDAPAuth) Check(username string) (DirEntry, error) {
+	username = a.normalize(username)
 	if !usernameRe.MatchString(username) {
 		return DirEntry{Disabled: true, Reason: "not a valid username"}, nil
 	}
@@ -192,7 +276,7 @@ func (a *LDAPAuth) Check(username string) (DirEntry, error) {
 	if entry == nil {
 		return DirEntry{Disabled: true, Reason: "not in the directory"}, nil
 	}
-	return a.entry(entry)
+	return a.entry(entry, a.memberOf(conn, entry))
 }
 
 func (a *LDAPAuth) CheckAll() (map[string]DirEntry, error) {
@@ -203,14 +287,30 @@ func (a *LDAPAuth) CheckAll() (map[string]DirEntry, error) {
 	defer conn.Close()
 	result, err := conn.SearchWithPaging(ldap.NewSearchRequest(
 		a.BaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 60, false,
-		"(objectClass=posixAccount)", userAttrs, nil,
+		a.usersFilter(), a.attrs(), nil,
 	), 500)
 	if err != nil {
 		return nil, fmt.Errorf("LDAP search: %w", err)
 	}
+	inGroup := func(e *ldap.Entry) func(string) bool { return func(g string) bool { return hasGroup(e, g) } }
+	if a.ad() {
+		// Each group's members, nested groups' too, in one search each.
+		members := map[string]map[string]bool{}
+		for _, g := range []string{a.AllowedGroup, a.AdminGroup} {
+			if g == "" {
+				continue
+			}
+			if members[strings.ToLower(g)], err = a.chainMembers(conn, g); err != nil {
+				return nil, err
+			}
+		}
+		inGroup = func(e *ldap.Entry) func(string) bool {
+			return func(g string) bool { return members[strings.ToLower(g)][strings.ToLower(e.DN)] }
+		}
+	}
 	out := map[string]DirEntry{}
 	for _, e := range result.Entries {
-		name := e.GetAttributeValue("uid")
+		name := a.normalize(e.GetAttributeValue(a.nameAttr()))
 		if !usernameRe.MatchString(name) {
 			continue
 		}
@@ -218,7 +318,7 @@ func (a *LDAPAuth) CheckAll() (map[string]DirEntry, error) {
 			out[name] = DirEntry{Disabled: true, Reason: "more than one account with this name"}
 			continue
 		}
-		d, err := a.entry(e)
+		d, err := a.entry(e, inGroup(e))
 		if err != nil {
 			d = DirEntry{Disabled: true, Reason: err.Error()}
 		}
@@ -234,7 +334,11 @@ func (a *LDAPAuth) Groups() ([]string, error) {
 	}
 	defer conn.Close()
 	filter := a.GroupFilter
-	if filter == "" {
+	switch {
+	case filter != "":
+	case a.ad():
+		filter = "(objectClass=group)"
+	default:
 		filter = "(objectClass=posixGroup)"
 	}
 	result, err := conn.SearchWithPaging(ldap.NewSearchRequest(
@@ -266,12 +370,80 @@ func groupName(dn string) string {
 	return parsed.RDNs[0].Attributes[0].Value
 }
 
-// entry turns a directory entry into what the portal needs to know.
-func (a *LDAPAuth) entry(e *ldap.Entry) (DirEntry, error) {
+// memberOf is how a person's membership of a group is read: their own
+// memberOf, or with the ad schema, AD's through nested groups.
+func (a *LDAPAuth) memberOf(conn *ldap.Conn, e *ldap.Entry) func(string) bool {
+	if !a.ad() {
+		return func(g string) bool { return hasGroup(e, g) }
+	}
+	return func(g string) bool {
+		result, err := conn.Search(ldap.NewSearchRequest(
+			e.DN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 10, false,
+			fmt.Sprintf("(memberOf:%s:=%s)", adInChain, ldap.EscapeFilter(g)), []string{"dn"}, nil,
+		))
+		return err == nil && len(result.Entries) > 0
+	}
+}
+
+// chainMembers are the DNs (lowercased) of the people in an AD group,
+// through nested groups.
+func (a *LDAPAuth) chainMembers(conn *ldap.Conn, group string) (map[string]bool, error) {
+	result, err := conn.SearchWithPaging(ldap.NewSearchRequest(
+		a.BaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 60, false,
+		fmt.Sprintf("(&%s(memberOf:%s:=%s))", a.usersFilter(), adInChain, ldap.EscapeFilter(group)), []string{"dn"}, nil,
+	), 500)
+	if err != nil {
+		return nil, fmt.Errorf("LDAP search for %s's members: %w", group, err)
+	}
+	out := map[string]bool{}
+	for _, e := range result.Entries {
+		out[strings.ToLower(e.DN)] = true
+	}
+	return out, nil
+}
+
+// ids are a person's uid and gid: the directory's, or with the ad schema,
+// mapped from their SID, or the defaults.
+func (a *LDAPAuth) ids(e *ldap.Entry) (int, int, error) {
 	uid, err1 := strconv.Atoi(strings.TrimSpace(e.GetAttributeValue("uidNumber")))
 	gid, err2 := strconv.Atoi(strings.TrimSpace(e.GetAttributeValue("gidNumber")))
-	if err1 != nil || err2 != nil {
-		return DirEntry{}, fmt.Errorf("LDAP entry %s has no usable uidNumber/gidNumber", e.DN)
+	if err1 == nil && err2 == nil {
+		return uid, gid, nil
+	}
+	if !a.ad() {
+		return 0, 0, fmt.Errorf("LDAP entry %s has no usable uidNumber/gidNumber", e.DN)
+	}
+	if a.IDRangeBase > 0 {
+		rid, ok := sidRID(e.GetRawAttributeValue("objectSid"))
+		pg, err := strconv.Atoi(strings.TrimSpace(e.GetAttributeValue("primaryGroupID")))
+		if ok && err == nil {
+			return a.IDRangeBase + int(rid), a.IDRangeBase + pg, nil
+		}
+	}
+	if a.DefaultUID > 0 && a.DefaultGID > 0 {
+		return a.DefaultUID, a.DefaultGID, nil
+	}
+	return 0, 0, fmt.Errorf("LDAP entry %s has no uidNumber/gidNumber, and neither LDAP_ID_RANGE_BASE nor LDAP_DEFAULT_UID/GID is set", e.DN)
+}
+
+// sidRID is a binary SID's last subauthority: the account's RID.
+func sidRID(sid []byte) (uint32, bool) {
+	if len(sid) < 8 {
+		return 0, false
+	}
+	n := int(sid[1])
+	if n == 0 || len(sid) != 8+4*n {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(sid[len(sid)-4:]), true
+}
+
+// entry turns a directory entry into what the portal needs to know, with
+// inGroup saying whether they are in a group (by DN).
+func (a *LDAPAuth) entry(e *ldap.Entry, inGroup func(string) bool) (DirEntry, error) {
+	uid, gid, err := a.ids(e)
+	if err != nil {
+		return DirEntry{}, err
 	}
 	d := DirEntry{UID: uid, GID: gid}
 	for _, g := range e.GetAttributeValues("memberOf") {
@@ -280,7 +452,7 @@ func (a *LDAPAuth) entry(e *ldap.Entry) (DirEntry, error) {
 		}
 	}
 	sort.Strings(d.Groups)
-	d.Admin = a.AdminGroup != "" && hasGroup(e, a.AdminGroup)
+	d.Admin = a.AdminGroup != "" && inGroup(a.AdminGroup)
 	now := time.Now
 	if a.now != nil {
 		now = a.now
@@ -289,8 +461,10 @@ func (a *LDAPAuth) entry(e *ldap.Entry) (DirEntry, error) {
 	// Never map anyone onto root's files.
 	case uid == 0 || gid == 0:
 		d.Disabled, d.Reason = true, "root ids"
-	case a.AllowedGroup != "" && !hasGroup(e, a.AllowedGroup):
+	case a.AllowedGroup != "" && !inGroup(a.AllowedGroup):
 		d.Disabled, d.Reason = true, "not in the allowed group"
+	case a.ad():
+		d.Disabled, d.Reason = adAccountLocked(e, now())
 	default:
 		d.Disabled, d.Reason = accountLocked(e, now())
 	}
@@ -298,6 +472,32 @@ func (a *LDAPAuth) entry(e *ldap.Entry) (DirEntry, error) {
 		d.Admin = false
 	}
 	return d, nil
+}
+
+// AD's userAccountControl and msDS-User-Account-Control-Computed bits.
+const (
+	adAccountDisable = 0x2
+	adLockout        = 0x10
+)
+
+// adAccountLocked reads AD's marks of an unusable account: disabled
+// (userAccountControl), locked out (msDS-User-Account-Control-Computed,
+// which AD works out from the lockout policy), or past accountExpires.
+func adAccountLocked(e *ldap.Entry, now time.Time) (bool, string) {
+	if uac, err := strconv.ParseInt(strings.TrimSpace(e.GetAttributeValue("userAccountControl")), 10, 64); err == nil && uac&adAccountDisable != 0 {
+		return true, "account disabled"
+	}
+	if c, err := strconv.ParseInt(strings.TrimSpace(e.GetAttributeValue("msDS-User-Account-Control-Computed")), 10, 64); err == nil && c&adLockout != 0 {
+		return true, "account locked"
+	}
+	// 100ns intervals since 1601; 0 or the largest int64 means never.
+	if v, err := strconv.ParseInt(strings.TrimSpace(e.GetAttributeValue("accountExpires")), 10, 64); err == nil && v > 0 && v != 1<<63-1 {
+		const fromWindowsEpoch = 11644473600
+		if now.Unix() >= v/10_000_000-fromWindowsEpoch {
+			return true, "account expired"
+		}
+	}
+	return false, ""
 }
 
 // accountLocked reads the attributes directories use to mark an account

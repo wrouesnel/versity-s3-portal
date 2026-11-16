@@ -182,7 +182,7 @@ func TestLDAPEntries(t *testing.T) {
 		}
 		return ldap.NewEntry("cn=alice,ou=users,dc=example,dc=com", base)
 	}
-	d, err := a.entry(entry(nil))
+	d, err := posixEntry(a, entry(nil))
 	if err != nil || d.Disabled || !d.Admin || d.UID != 1001 || strings.Join(d.Groups, ",") != "S3-Admin,photos,s3-users" {
 		t.Fatalf("alice: %+v %v", d, err)
 	}
@@ -194,7 +194,7 @@ func TestLDAPEntries(t *testing.T) {
 		"expired":        {"shadowExpire": {"19999"}},
 		"root":           {"uidNumber": {"0"}},
 	} {
-		d, err := a.entry(entry(attrs))
+		d, err := posixEntry(a, entry(attrs))
 		if err != nil || !d.Disabled || d.Admin || d.Reason == "" {
 			t.Errorf("%s: want disabled, got %+v %v", name, d, err)
 		}
@@ -204,11 +204,11 @@ func TestLDAPEntries(t *testing.T) {
 		"never expires": {"shadowExpire": {"-1"}},
 		"active":        {"accountStatus": {"active"}},
 	} {
-		if d, err := a.entry(entry(attrs)); err != nil || d.Disabled {
+		if d, err := posixEntry(a, entry(attrs)); err != nil || d.Disabled {
 			t.Errorf("%s: want enabled, got %+v %v", name, d, err)
 		}
 	}
-	if _, err := a.entry(entry(map[string][]string{"uidNumber": {""}})); err == nil {
+	if _, err := posixEntry(a, entry(map[string][]string{"uidNumber": {""}})); err == nil {
 		t.Fatal("an entry without uidNumber should be an error")
 	}
 	for _, name := range []string{"Bad Name", "a,cn=admin", "*", ""} {
@@ -218,6 +218,90 @@ func TestLDAPEntries(t *testing.T) {
 	}
 	if g := groupName("ou=s3-users,ou=groups,dc=example,dc=com"); g != "s3-users" {
 		t.Errorf("groupName: %q", g)
+	}
+}
+
+// posixEntry is a posix directory's entry, its groups its own memberOf.
+func posixEntry(a *LDAPAuth, e *ldap.Entry) (DirEntry, error) {
+	return a.entry(e, func(g string) bool { return hasGroup(e, g) })
+}
+
+// An AD entry: named by sAMAccountName without case, its ids its RFC 2307
+// ones, else mapped from its SID, else the defaults; disabled, locked out
+// or expired by AD's own attributes; its groups nested as AD says.
+func TestADEntries(t *testing.T) {
+	a := &LDAPAuth{
+		Schema:       SchemaAD,
+		AllowedGroup: "CN=s3-users,OU=Groups,DC=example,DC=internal",
+		AdminGroup:   "CN=s3-admins,OU=Groups,DC=example,DC=internal",
+		now:          func() time.Time { return time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC) },
+	}
+	if got := a.filterFor("al*ce"); got != `(&(objectCategory=person)(objectClass=user)(sAMAccountName=al\2ace))` {
+		t.Fatalf("filter %s", got)
+	}
+	if a.normalize("Alice") != "alice" || (&LDAPAuth{}).normalize("Alice") != "Alice" {
+		t.Error("AD's names are matched without case; posix names are not")
+	}
+	// S-1-5-21-1-2-3-1104: its RID is 1104.
+	sid := []byte{1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0x50, 0x04, 0, 0}
+	if rid, ok := sidRID(sid); !ok || rid != 1104 {
+		t.Fatalf("sidRID %d %v", rid, ok)
+	}
+	if _, ok := sidRID(sid[:10]); ok {
+		t.Error("a short SID was read")
+	}
+	entry := func(attrs map[string][]string) *ldap.Entry {
+		base := map[string][]string{
+			"sAMAccountName": {"Alice"}, "userAccountControl": {"512"}, "accountExpires": {"9223372036854775807"},
+			"primaryGroupID": {"513"}, "memberOf": {"CN=photos,OU=Groups,DC=example,DC=internal"},
+		}
+		for k, v := range attrs {
+			base[k] = v
+		}
+		e := ldap.NewEntry("CN=Alice,OU=Users,DC=example,DC=internal", base)
+		e.Attributes = append(e.Attributes, &ldap.EntryAttribute{Name: "objectSid", ByteValues: [][]byte{sid}})
+		return e
+	}
+	// Nested membership, as AD's in-chain rule gives it: in both groups.
+	nested := func(string) bool { return true }
+	if _, err := a.entry(entry(nil), nested); err == nil {
+		t.Error("an AD entry with no ids, and no mapping or defaults, was taken")
+	}
+	a.IDRangeBase = 200000
+	d, err := a.entry(entry(nil), nested)
+	if err != nil || d.Disabled || !d.Admin || d.UID != 201104 || d.GID != 200513 || strings.Join(d.Groups, ",") != "photos" {
+		t.Fatalf("alice by her SID: %+v %v", d, err)
+	}
+	if d, err := a.entry(entry(map[string][]string{"uidNumber": {"5001"}, "gidNumber": {"5000"}}), nested); err != nil || d.UID != 5001 || d.GID != 5000 {
+		t.Errorf("alice by her RFC 2307 ids: %+v %v", d, err)
+	}
+	a.IDRangeBase, a.DefaultUID, a.DefaultGID = 0, 900, 900
+	if d, err := a.entry(entry(nil), nested); err != nil || d.UID != 900 || d.GID != 900 {
+		t.Errorf("alice by the defaults: %+v %v", d, err)
+	}
+	if d, _ := a.entry(entry(nil), func(g string) bool { return !strings.Contains(g, "s3-users") }); !d.Disabled || d.Admin {
+		t.Errorf("outside the allowed group: %+v", d)
+	}
+	if d, _ := a.entry(entry(nil), func(g string) bool { return strings.Contains(g, "s3-users") }); d.Disabled || d.Admin {
+		t.Errorf("a user, not an admin: %+v", d)
+	}
+	for name, attrs := range map[string]map[string][]string{
+		"disabled":   {"userAccountControl": {"514"}},
+		"locked out": {"msDS-User-Account-Control-Computed": {"16"}},
+		"expired":    {"accountExpires": {"133000000000000000"}}, // 2022
+	} {
+		if d, err := a.entry(entry(attrs), nested); err != nil || !d.Disabled || d.Admin || d.Reason == "" {
+			t.Errorf("%s: want disabled, got %+v %v", name, d, err)
+		}
+	}
+	for name, attrs := range map[string]map[string][]string{
+		"never expires (0)": {"accountExpires": {"0"}},
+		"expires later":     {"accountExpires": {"140000000000000000"}}, // 2044
+		"not locked out":    {"msDS-User-Account-Control-Computed": {"0"}},
+	} {
+		if d, err := a.entry(entry(attrs), nested); err != nil || d.Disabled {
+			t.Errorf("%s: want enabled, got %+v %v", name, d, err)
+		}
 	}
 }
 
