@@ -5,6 +5,7 @@
 <section class="card">
   <h1>Key created: {{.KeyLabel}}</h1>
   <p class="flash warning">Copy the secret now. It isn't shown again. If you lose it, revoke the key and make a new one.</p>
+  {{if .IssuedFor}}<p>This is <strong>{{.IssuedFor}}</strong>'s key, issued by you: what it writes is theirs on disk. It's on their Access keys page, marked as yours. Revoke it (Admin → Access keys) once the data is in.</p>{{end}}
   <dl>
     <dt>Access key ID</dt><dd><code class="copy">{{.KeyAccess}}</code></dd>
     <dt>Secret access key</dt><dd><code class="copy">{{.KeySecret}}</code></dd>
@@ -29,8 +30,10 @@ no_head = true{{end}}</pre>
   <p class="muted small"><code>no_check_bucket</code> is optional: it saves rclone trying to create the bucket first.{{if $wo}} <code>no_head</code> is for the write-only bucket, as below.{{end}}</p>
 
   <h2>MinIO client (mc)</h2>
-  <pre class="copy">mc alias set s3 {{.S3URL}} {{.KeyAccess}} {{.KeySecret}} --api S3v4 --path on
+  <pre class="copy">export AWS_REGION={{.Region}}
+mc alias set s3 {{.S3URL}} {{.KeyAccess}} {{.KeySecret}} --api S3v4 --path on
 mc ls s3/{{$eg}}/</pre>
+  <p class="muted small">mc takes its region from <code>AWS_REGION</code>, which hosts in a cloud often have set to their own. With another region, <code>mc ls</code> fails, and <code>mc mirror</code> copies nothing and still exits 0: check with <code>mc diff</code>.</p>
 
   <h2>AWS CLI</h2>
   <pre class="copy">AWS_ACCESS_KEY_ID={{.KeyAccess}} AWS_SECRET_ACCESS_KEY={{.KeySecret}} \
@@ -40,7 +43,7 @@ mc ls s3/{{$eg}}/</pre>
   <div class="flash warning">
     <p><strong>Write only</strong> ({{at .Grants "writeonly"}}): the key can upload but not list or read, and many tools look before they write.</p>
     <ul class="small">
-      <li>rclone: <code>no_head = true</code> and <code>rclone copy --no-check-dest</code> (or <code>--no-traverse</code>). Not <code>sync</code>, and not <code>copy</code> without those flags: it uploads, then fails to check and uploads again.</li>
+      <li>rclone: <code>no_head = true</code> and <code>rclone copy --no-check-dest</code> (or <code>--no-traverse</code>), to the bucket or a path in it ending in <code>/</code> (<code>s3:{{$eg}}/incoming/</code>: without the <code>/</code>, rclone looks the path up as a file, which the key can't, and stops). Not <code>sync</code>, and not <code>copy</code> without those flags: it uploads, then fails to check and uploads again.</li>
       <li>mc: <code>mc cp</code> works; <code>mc mirror</code> doesn't.</li>
       <li>AWS CLI: <code>aws s3 cp</code> works; <code>aws s3 sync</code> doesn't.</li>
     </ul>
@@ -57,6 +60,6 @@ mc ls s3/{{$eg}}/</pre>
     </ul>
   </div>
   {{end}}
-  <p><a class="button" href="/keys">Done</a></p>
+  <p><a class="button" href="{{if .IssuedFor}}/admin?section=keys{{else}}/keys{{end}}">Done</a></p>
 </section>
 {{template "footer" .}}

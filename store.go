@@ -21,6 +21,10 @@ type Key struct {
 	// Buckets is what the key was asked to have. What it gets is this
 	// limited by what its owner may currently do in each bucket.
 	Buckets map[string]Perm `json:"buckets"`
+	// IssuedBy is the admin who made the key for its owner (to load data
+	// into their buckets, as a migration), if one did: shown to the owner,
+	// who may revoke it.
+	IssuedBy string `json:"issuedBy,omitempty"`
 }
 
 // WebAccount is the gateway account the portal acts as for someone in the

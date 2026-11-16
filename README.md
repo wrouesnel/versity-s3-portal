@@ -168,7 +168,17 @@ they pick.
   - check someone or everyone against the directory now;
   - log someone out;
   - revoke a key, a person's keys, or every key (typing "revoke all");
-  - change any bucket's group grants, or delete it.
+  - change any bucket's group grants, or delete it;
+  - make a bucket for someone (Admin → Buckets → New bucket for someone),
+    theirs as if they'd made it;
+  - issue someone a key on their buckets, to load data in, as a migration
+    would (Admin → Buckets → Issue a key to load data). It's the owner's
+    key: what it writes is theirs on disk, it reaches no more than they
+    can, and it's on their keys page, marked as issued by the admin, to
+    revoke. rclone sync, aws s3 sync and mc mirror need read & write;
+    write only takes aws s3 cp and rclone copy --no-check-dest to a path
+    ending in `/`. With mc, set `AWS_REGION` to the gateway's region: with
+    another, mc mirror copies nothing and still exits 0.
 
   Admins don't get to read anyone's files by being admins.
 - **API.** For automation, such as a user-management job that disables

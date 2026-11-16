@@ -208,6 +208,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/trash/purge", s.authed(s.admin(s.adminPurgeTrash)))
 	s.mirrorRoutes(mux)
 	s.serverRoutes(mux)
+	s.adminBucketRoutes(mux)
 	// API, for automation and scripts.
 	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
 	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
@@ -289,6 +290,12 @@ type page struct {
 	Mirrors    []MirrorView
 	Mirror     *MirrorView
 	MirrorForm *MirrorRequest
+	// AdminKey is the form an admin issues someone's key on, to load data
+	// into their bucket; IssuedFor names whose key was just made.
+	AdminKey  *AdminKeyForm
+	IssuedFor string
+	// NewBucketOwner is who the admin's new-bucket form is for, if given.
+	NewBucketOwner string
 	// Server mirrors: the list, one server's page, and the new-server form.
 	Servers    []ServerSummary
 	Server     *ServerView
@@ -1116,6 +1123,9 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 	p.Section = r.URL.Query().Get("section")
 	switch p.Section {
 	case "buckets", "keys", "trash", "revoke", "mirrors":
+		if p.Section == "buckets" {
+			p.NewBucketOwner = r.URL.Query().Get("for")
+		}
 	default:
 		p.Section = "people"
 	}

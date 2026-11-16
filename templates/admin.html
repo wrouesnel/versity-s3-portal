@@ -5,7 +5,7 @@
       <h2>Admin</h2>
       <ul>
         <li><a class="section" href="/admin?section=people"{{if eq .Section "people"}} aria-current="page"{{end}}>People <span class="count">{{len .People}}</span></a></li>
-        <li><a class="section" href="/admin?section=buckets"{{if eq .Section "buckets"}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
+        <li><a class="section" href="/admin?section=buckets"{{if or (eq .Section "buckets") (eq .Section "key-new")}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
         <li><a class="section" href="/admin?section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys <span class="count">{{len .AllKeys}}</span></a></li>
         <li><a class="section" href="/admin?section=mirrors"{{if or (eq .Section "mirrors") (eq .Section "mirror") (eq .Section "mirror-new") (eq .Section "server") (eq .Section "server-new")}} aria-current="page"{{end}}>Mirrors <span class="count">{{len .Mirrors}}</span></a></li>
         {{if .ZFS}}<li><a class="section" href="/admin?section=trash"{{if eq .Section "trash"}} aria-current="page"{{end}}>Deleted buckets <span class="count">{{len .Trash}}</span></a></li>{{end}}
@@ -26,7 +26,24 @@
     </div>
 
     {{if eq .Section "buckets"}}
-    <div class="pane-head"><h1>Buckets</h1></div>
+    <div class="pane-head"><h1>Buckets</h1>
+      <details class="menu"{{if .NewBucketOwner}} open{{end}}>
+        <summary class="button">New bucket for someone…</summary>
+        <div class="pop">
+          <form method="post" action="/admin/buckets" autocomplete="off">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <label>Bucket <input name="name" required pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]" placeholder="lowercase-name"></label>
+            <label>Owner
+              <select name="owner" required>
+                {{$o := .NewBucketOwner}}{{range .People}}{{if not .Disabled}}<option value="{{.User}}"{{if eq .User $o}} selected{{end}}>{{.User}}</option>{{end}}{{end}}
+              </select>
+            </label>
+            <p class="muted small">It's theirs, as if they'd made it: files in it are owned by them on disk. Next, you can issue them a key for it, to load data in.</p>
+            <button>Make the bucket</button>
+          </form>
+        </div>
+      </details>
+    </div>
     {{if .AllBuckets}}
     <input type="search" class="table-filter" data-table="#admin-buckets" placeholder="Filter {{len .AllBuckets}} buckets" aria-label="Filter buckets">
     <div class="narrow-scroll"><table class="files" id="admin-buckets">
@@ -43,6 +60,7 @@
           <div class="pop menu-list">
             <a class="menu-item" href="/buckets/settings?bucket={{.Name}}">Group access</a>
             <a class="menu-item" href="/buckets/settings?bucket={{.Name}}&amp;section=keys">Access keys</a>
+            {{if .Owner}}<a class="menu-item" href="/admin/keys/new?bucket={{.Name}}">Issue a key to load data…</a>{{end}}
             {{if $.ZFS}}<a class="menu-item" href="/buckets/settings?bucket={{.Name}}&amp;section=storage">Storage and backups</a>{{end}}
             <a class="menu-item" href="/files?bucket={{.Name}}">Browse files</a>
           </div>
@@ -66,7 +84,7 @@
       {{range .AllKeys}}
       <tr>
         <td>{{.Owner}}</td>
-        <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
+        <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}{{if .IssuedBy}} by <span class="pill write" title="An admin issued this key for its owner">{{.IssuedBy}}</span>{{end}}</div></td>
         <td><code>{{.Access}}</code></td>
         <td>{{template "perms" .Buckets}}</td>
         <td class="actions"><details class="menu row-menu">
@@ -206,6 +224,24 @@
       </div>
       <p class="muted small">The source is checked before anything is saved: it's listed, and one object read. Not carried over: old versions, object lock, tags, ACLs, bucket policies, lifecycle rules, and the source's access keys.</p>
       <p><button>Check the source and start</button> <a class="button ghost" href="/admin?section=mirrors">Cancel</a></p>
+    </form>
+    {{end}}
+
+    {{else if eq .Section "key-new"}}
+    {{with .AdminKey}}
+    <div class="pane-head"><nav class="crumbs" aria-label="Buckets"><a href="/admin?section=buckets">Buckets</a><span class="sep">/</span><a href="/admin/keys/new?bucket={{.Bucket}}" aria-current="page">Issue {{.Owner}} a key</a></nav></div>
+    <form method="post" action="/admin/keys" class="mirror-form" autocomplete="off">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="owner" value="{{.Owner}}">
+      <p>A key of <strong>{{.Owner}}</strong>'s, to load data into their bucket: what it writes is theirs on disk, and it reaches no more than they can. It's on their Access keys page, marked as issued by you, where they (or you) can revoke it. Revoke it when the data is in.</p>
+      <label>Name <input name="label" value="{{.Label}}" required maxlength="64"></label>
+      <label>Bucket
+        <select name="bucket" required>{{$b := .Bucket}}{{range .Buckets}}<option value="{{.}}"{{if eq . $b}} selected{{end}}>{{.}}</option>{{end}}</select>
+      </label>
+      <fieldset class="choices"><legend>Access</legend>{{$l := .Level}}
+        {{range perms}}<label class="check"><input type="radio" name="level" value="{{.}}"{{if eq . $l}} checked{{end}}> {{permLabel .}}{{if eq . "readwrite"}}: what rclone sync, aws s3 sync and mc mirror need, to list what's there, resume and check{{else if eq . "createonly"}}: new names only, each a single PUT with If-None-Match (most tools don't send it){{else if eq . "writeonly"}}: uploads only, without listing (aws s3 cp --recursive; rclone copy --no-check-dest to a path ending in /): no resuming, and nothing to check with{{else}}: to check what was loaded{{end}}</label>{{end}}
+      </fieldset>
+      <p class="muted small">Read &amp; write lets whoever holds the key read {{.Owner}}'s files in the bucket too: give it only to whoever loads the data.</p>
+      <p><button>Issue the key</button> <a class="button ghost" href="/admin?section=buckets">Cancel</a></p>
     </form>
     {{end}}
 

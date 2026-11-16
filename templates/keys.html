@@ -12,7 +12,7 @@
     <tbody>
     {{range .Keys}}{{$now := index $.KeyCaps .Access}}
     <tr>
-      <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}</div></td>
+      <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}{{if .IssuedBy}} by <span class="pill write" title="An admin issued this key for you, to load data into your buckets. Revoke it if it's no longer needed.">{{.IssuedBy}}, an admin</span>{{end}}</div></td>
       <td><code class="copy">{{.Access}}</code></td>
       <td>
         {{if .Buckets}}

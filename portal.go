@@ -795,6 +795,57 @@ func cleanLabel(label string) (string, error) {
 // CreateKey issues a new access key for u and returns its secret, which
 // isn't shown again.
 func (p *Portal) CreateKey(ctx context.Context, u User, label string, grants map[string]Perm) (string, string, error) {
+	return p.createKey(ctx, u, label, grants, "")
+}
+
+// CreateBucketFor makes a bucket owned by someone else, for admins: as
+// they would make it, a dataset of its own, theirs on disk.
+func (p *Portal) CreateBucketFor(ctx context.Context, admin User, owner, name string) error {
+	if err := requireAdmin(admin); err != nil {
+		return err
+	}
+	person, err := p.knownPerson(owner)
+	if err != nil {
+		return err
+	}
+	if err := p.CreateBucket(ctx, person.User(owner), name); err != nil {
+		return err
+	}
+	slog.Info("created bucket for someone", "admin", admin.Name, "owner", owner, "bucket", name)
+	return nil
+}
+
+// CreateKeyFor issues an access key owned by someone else, for admins: to
+// load data into their buckets (a migration), as them, so what it writes is
+// theirs on disk. It reaches no more than they can, is recorded as issued by
+// the admin, and is on its owner's keys page, to revoke.
+func (p *Portal) CreateKeyFor(ctx context.Context, admin User, owner, label string, grants map[string]Perm) (string, string, error) {
+	if err := requireAdmin(admin); err != nil {
+		return "", "", err
+	}
+	person, err := p.knownPerson(owner)
+	if err != nil {
+		return "", "", err
+	}
+	if len(grants) == 0 {
+		return "", "", userErr("Pick the buckets the key is for.")
+	}
+	return p.createKey(ctx, person.User(owner), label, grants, admin.Name)
+}
+
+// knownPerson is someone the portal knows, who may own buckets and keys.
+func (p *Portal) knownPerson(name string) (*Person, error) {
+	person, ok := p.store.Person(strings.TrimSpace(name))
+	if !ok {
+		return nil, userErr("Nobody called %q has logged in, so they can't own buckets or keys yet.", name)
+	}
+	if person.Disabled {
+		return nil, userErr("%s is disabled (%s): they can't own new buckets or keys.", name, person.DisabledReason)
+	}
+	return person, nil
+}
+
+func (p *Portal) createKey(ctx context.Context, u User, label string, grants map[string]Perm, issuedBy string) (string, string, error) {
 	label, err := cleanLabel(label)
 	if err != nil {
 		return "", "", err
@@ -811,7 +862,7 @@ func (p *Portal) CreateKey(ctx context.Context, u User, label string, grants map
 	}); err != nil {
 		return "", "", err
 	}
-	if err := p.store.Put(access, &Key{Owner: u.Name, Label: label, Created: time.Now().UTC(), Buckets: grants}); err != nil {
+	if err := p.store.Put(access, &Key{Owner: u.Name, Label: label, Created: time.Now().UTC(), Buckets: grants, IssuedBy: issuedBy}); err != nil {
 		p.vgw.DeleteAccount(ctx, access)
 		return "", "", err
 	}
@@ -821,7 +872,7 @@ func (p *Portal) CreateKey(ctx context.Context, u User, label string, grants map
 		p.vgw.DeleteAccount(ctx, access)
 		return "", "", err
 	}
-	slog.Info("created key", "user", u.Name, "access", access, "label", label, "buckets", grants)
+	slog.Info("created key", "user", u.Name, "access", access, "label", label, "buckets", grants, "issuedBy", issuedBy)
 	return access, secret, nil
 }
 
