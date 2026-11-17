@@ -118,7 +118,13 @@ func TestSessions(t *testing.T) {
 	}
 
 	tampered := *cookie
-	tampered.Value = "x" + cookie.Value[1:]
+	// Change the first character: to "x", unless it's that already (the session ID is
+	// random), when the cookie wouldn't be changed at all.
+	first := "x"
+	if cookie.Value[0] == 'x' {
+		first = "y"
+	}
+	tampered.Value = first + cookie.Value[1:]
 	if _, err := get(&tampered, s); err == nil {
 		t.Fatal("tampered session accepted")
 	}

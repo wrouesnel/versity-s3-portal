@@ -307,18 +307,31 @@ func (a *LDAPAuth) CheckAll() (map[string]DirEntry, error) {
 	}
 	inGroup := func(e *ldap.Entry) func(string) bool { return func(g string) bool { return hasGroup(e, g) } }
 	if a.ad() {
-		// Each group's members, nested groups' too, in one search each.
+		// Each group's members, nested groups' too, in one search each, and
+		// the groups whose members are in it by their primary group.
 		members := map[string]map[string]bool{}
+		primaries := map[string]map[string]bool{}
 		for _, g := range []string{a.AllowedGroup, a.AdminGroup} {
 			if g == "" {
 				continue
 			}
-			if members[strings.ToLower(g)], err = a.chainMembers(conn, g); err != nil {
+			key := strings.ToLower(g)
+			if members[key], err = a.chainMembers(conn, g); err != nil {
+				return nil, err
+			}
+			if primaries[key], err = a.chainGroupSIDs(conn, g); err != nil {
 				return nil, err
 			}
 		}
 		inGroup = func(e *ldap.Entry) func(string) bool {
-			return func(g string) bool { return members[strings.ToLower(g)][strings.ToLower(e.DN)] }
+			return func(g string) bool {
+				key := strings.ToLower(g)
+				if members[key][strings.ToLower(e.DN)] {
+					return true
+				}
+				pg := primaryGroupSID(e)
+				return pg != nil && primaries[key][string(pg)]
+			}
 		}
 	}
 	out := map[string]DirEntry{}
@@ -384,18 +397,94 @@ func groupName(dn string) string {
 }
 
 // memberOf is how a person's membership of a group is read: their own
-// memberOf, or with the ad schema, AD's through nested groups.
+// memberOf, or with the ad schema, AD's through nested groups, their primary
+// group included.
 func (a *LDAPAuth) memberOf(conn *ldap.Conn, e *ldap.Entry) func(string) bool {
 	if !a.ad() {
 		return func(g string) bool { return hasGroup(e, g) }
 	}
-	return func(g string) bool {
+	inChain := func(dn, g string) bool {
 		result, err := conn.Search(ldap.NewSearchRequest(
-			e.DN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 10, false,
+			dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 10, false,
 			fmt.Sprintf("(memberOf:%s:=%s)", adInChain, ldap.EscapeFilter(g)), []string{"dn"}, nil,
 		))
 		return err == nil && len(result.Entries) > 0
 	}
+	// The primary group (usually Domain Users) is in no memberOf, and the
+	// in-chain rule doesn't follow it: a group holding Domain Users holds
+	// everyone, but only by way of their primary group. It's looked up once,
+	// if needed.
+	primary, looked := "", false
+	return func(g string) bool {
+		if inChain(e.DN, g) {
+			return true
+		}
+		if !looked {
+			primary, looked = a.primaryGroupDN(conn, e), true
+		}
+		return primary != "" && (strings.EqualFold(primary, g) || inChain(primary, g))
+	}
+}
+
+// primaryGroupSID is an AD account's primary group's SID: its own SID with
+// the last subauthority, its RID, made primaryGroupID. Nil if it has none.
+func primaryGroupSID(e *ldap.Entry) []byte {
+	sid := e.GetRawAttributeValue("objectSid")
+	pg, err := strconv.ParseUint(strings.TrimSpace(e.GetAttributeValue("primaryGroupID")), 10, 32)
+	if _, ok := sidRID(sid); !ok || err != nil {
+		return nil
+	}
+	group := append([]byte{}, sid...)
+	binary.LittleEndian.PutUint32(group[len(group)-4:], uint32(pg))
+	return group
+}
+
+// escapeBinary escapes every byte of a binary value, such as a SID, for an
+// LDAP filter.
+func escapeBinary(b []byte) string {
+	var sb strings.Builder
+	for _, c := range b {
+		fmt.Fprintf(&sb, "\\%02x", c)
+	}
+	return sb.String()
+}
+
+// primaryGroupDN is the DN of an AD account's primary group, or "" if it
+// can't be found.
+func (a *LDAPAuth) primaryGroupDN(conn *ldap.Conn, e *ldap.Entry) string {
+	sid := primaryGroupSID(e)
+	if sid == nil {
+		return ""
+	}
+	result, err := conn.Search(ldap.NewSearchRequest(
+		a.BaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 2, 10, false,
+		"(&(objectClass=group)(objectSid="+escapeBinary(sid)+"))", []string{"dn"}, nil,
+	))
+	if err != nil || len(result.Entries) != 1 {
+		return ""
+	}
+	return result.Entries[0].DN
+}
+
+// chainGroupSIDs are the SIDs (as strings of their bytes) of an AD group and
+// every group nested in it: a person whose primary group is one of them is
+// in the group.
+func (a *LDAPAuth) chainGroupSIDs(conn *ldap.Conn, group string) (map[string]bool, error) {
+	result, err := conn.SearchWithPaging(ldap.NewSearchRequest(
+		a.BaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 60, false,
+		fmt.Sprintf("(&(objectClass=group)(|(distinguishedName=%s)(memberOf:%s:=%s)))",
+			ldap.EscapeFilter(group), adInChain, ldap.EscapeFilter(group)), []string{"objectSid"}, nil,
+	), 500)
+	if err != nil {
+		return nil, fmt.Errorf("LDAP search for the groups in %s: %w", group, err)
+	}
+	out := map[string]bool{}
+	for _, e := range result.Entries {
+		if sid := e.GetRawAttributeValue("objectSid"); len(sid) > 0 {
+			out[string(sid)] = true
+		}
+	}
+	return out, nil
 }
 
 // chainMembers are the DNs (lowercased) of the people in an AD group,
