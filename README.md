@@ -213,8 +213,18 @@ they pick.
   Keys issued with the token are recorded as issued by `api-token`; with an
   admin's session, by that admin.
 
-  Calls need `Authorization: Bearer <API_TOKEN>`, or an admin's session
-  with the CSRF token in `X-CSRF-Token`. For example:
+  Calls need `Authorization: Bearer <token>`, or an admin's session
+  with the CSRF token in `X-CSRF-Token`. The token is either:
+  - one an admin issued on the admin page (**Admin → API tokens**), one per
+    tool (a migrator): shown once, kept only as its hash, listed with who
+    issued it and when it was last used, and revoked there. It acts as an
+    admin while the admin who issued it is one (known, enabled, still in the
+    admins' group), and its calls, and the keys it issues, are recorded as
+    `api:NAME`. Tokens are issued only on the admin page, never over the API;
+  - or the server's own, `API_TOKEN`, set where the portal is deployed,
+    recorded as `api-token`.
+
+  The API tokens page shows what a token can do, as curl. For example:
 
   ```sh
   curl -fsS -X POST -H "Authorization: Bearer $(cat /run/secrets/s3-api-token)" \
@@ -338,7 +348,7 @@ they pick.
 | `SESSION_KEY` | At least 32 random characters for signing session cookies (or `SESSION_KEY_FILE`) |
 | `STATE_FILE` | Where key records are kept. Its directory must be writable: mirrors keep files there too |
 | `PUBLIC_S3_URL` | The S3 endpoint as users should configure it |
-| `TITLE` | Page title (default `S3 access keys`) |
+| `TITLE` | Shown in the header and as the page title (default: none in the header, and "S3" as the page title) |
 | `LISTEN` | Listen address (default `:8080`) |
 | `TRUSTED_PROXIES` | Addresses or prefixes, comma-separated, of the TLS proxy in front. Logs take the client's address from `X-Forwarded-For` on requests from them (default: none, so logs show the proxy) |
 | `INSECURE_COOKIES` | Set to drop the cookie `Secure` flag, for testing over plain HTTP |

@@ -387,3 +387,6 @@ dl.verification { font-size: .9rem; }
      opens as a sheet along the bottom of the screen instead. */
   .narrow-scroll details.menu .pop, .table-scroll details.menu .pop { position: fixed; top: auto; left: 8px; right: 8px; bottom: 8px; z-index: 30; }
 }
+
+/* The header's home link: the icon, and TITLE only if configured. */
+.brand-icon { width: 20px; height: 20px; vertical-align: -4px; }

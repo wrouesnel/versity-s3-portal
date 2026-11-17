@@ -230,7 +230,7 @@ func run() error {
 	go portal.RunMirrors(ctx, time.Minute)
 
 	sessions := &Sessions{Key: []byte(sessionKey), TTL: 12 * time.Hour, Secure: env("INSECURE_COOKIES", "") == "", Store: store}
-	server := NewServer(portal, auth, oidcAuth, sessions, env("TITLE", "S3 access keys"), publicURL, vgw.Region)
+	server := NewServer(portal, auth, oidcAuth, sessions, os.Getenv("TITLE"), publicURL, vgw.Region)
 	server.APIToken = apiToken
 	server.TrustedProxies = trustedProxies
 	httpServer := &http.Server{

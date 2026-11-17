@@ -210,6 +210,7 @@ func (s *Server) Handler() http.Handler {
 	s.mirrorRoutes(mux)
 	s.serverRoutes(mux)
 	s.adminBucketRoutes(mux)
+	s.apiTokenRoutes(mux)
 	// API, for automation and scripts.
 	mux.HandleFunc("POST /api/directory/sync", s.api(s.apiSync))
 	mux.HandleFunc("GET /api/users/{name}", s.api(s.apiUser))
@@ -298,6 +299,16 @@ type page struct {
 	IssuedFor string
 	// NewBucketOwner is who the admin's new-bucket form is for, if given.
 	NewBucketOwner string
+	// API tokens: the list, whether the server has its own (API_TOKEN),
+	// and one just issued, shown once.
+	APITokens       []APITokenView
+	ServerAPIToken  bool
+	NewAPIToken     string
+	NewAPITokenName string
+	// PortalURL is where the portal is reached, for the API's examples.
+	PortalURL string
+	// Brand is the header's title: TITLE, or none.
+	Brand string
 	// Server mirrors: the list, one server's page, and the new-server form.
 	Servers    []ServerSummary
 	Server     *ServerView
@@ -320,7 +331,12 @@ type crumb struct {
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, p page) {
-	p.Title, p.S3URL, p.Region = s.Title, s.S3URL, s.Region
+	// The header shows a title only if one is configured; the browser's
+	// tab is "S3" without.
+	p.Brand, p.Title, p.S3URL, p.Region = s.Title, s.Title, s.S3URL, s.Region
+	if p.Title == "" {
+		p.Title = "S3"
+	}
 	p.PasswordLogin = s.Auth != nil
 	if s.OIDC != nil {
 		p.OIDCName = s.OIDC.Name
@@ -1124,7 +1140,7 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 	p := s.base(w, r, sess, "admin")
 	p.Section = r.URL.Query().Get("section")
 	switch p.Section {
-	case "buckets", "keys", "trash", "revoke", "mirrors":
+	case "buckets", "keys", "trash", "revoke", "mirrors", "tokens":
 		if p.Section == "buckets" {
 			p.NewBucketOwner = r.URL.Query().Get("for")
 		}
@@ -1171,6 +1187,9 @@ func (s *Server) adminCounts(r *http.Request, sess *Session, p *page) {
 	}
 	p.Mirrors, _ = s.Portal.MirrorList(sess.User)
 	p.Servers, _ = s.Portal.ServerList(sess.User)
+	p.APITokens, _ = s.Portal.APITokenList(sess.User)
+	p.ServerAPIToken = s.APIToken != ""
+	p.PortalURL = s.S3URL
 }
 
 func (s *Server) adminRestoreTrash(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -1273,6 +1292,12 @@ func (s *Server) api(h func(r *http.Request) (any, error)) http.HandlerFunc {
 		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 			allowed = s.APIToken != "" && subtle.ConstantTimeCompare([]byte(bearer), []byte(s.APIToken)) == 1
 			who, caller = "token", apiTokenAdmin
+			if !allowed {
+				// One an admin issued, on the admin page.
+				if u, ok := s.Portal.apiTokenUser(bearer); ok {
+					allowed, who, caller = true, u.Name, u
+				}
+			}
 		} else if sess, err := s.Sessions.Get(r); err == nil && sess.User.Admin {
 			allowed = r.Method == http.MethodGet || r.Header.Get("X-CSRF-Token") == sess.CSRF
 			who, caller = sess.User.Name, sess.User

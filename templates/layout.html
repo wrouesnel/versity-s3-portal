@@ -14,7 +14,7 @@
 <header class="top">
   <div class="top-inner">
     {{if or (eq .Tab "files") (eq .Tab "admin")}}<button type="button" class="hamburger" aria-controls="sidebar" aria-expanded="true" aria-label="Show or hide the bucket list" title="Bucket list"><span></span></button>{{end}}
-    <a class="brand" href="/">{{.Title}}</a>
+    <a class="brand" href="/" aria-label="{{.Title}}, home"><img src="{{asset "bucket.svg"}}" alt="" class="brand-icon">{{if .Brand}} {{.Brand}}{{end}}</a>
     {{if .User}}
     <nav class="links" aria-label="Main">
       <a href="/files"{{if eq .Tab "files"}} aria-current="page"{{end}}>Files</a>

@@ -112,6 +112,8 @@ type state struct {
 	Mirrors map[string]*Mirror `json:"mirrors,omitempty"`
 	// Servers are whole S3 servers whose buckets are mirrored in, by ID.
 	Servers map[string]*ServerMirror `json:"servers,omitempty"`
+	// APITokens are the API tokens admins issued, by ID: their hashes only.
+	APITokens map[string]*APIToken `json:"apiTokens,omitempty"`
 }
 
 // Store is a JSON file of the portal's state. Each method is safe to call
@@ -159,6 +161,9 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if st.Servers == nil {
 		st.Servers = map[string]*ServerMirror{}
+	}
+	if st.APITokens == nil {
+		st.APITokens = map[string]*APIToken{}
 	}
 	return s, nil
 }
@@ -501,6 +506,35 @@ func (s *Store) Servers() map[string]*ServerMirror {
 		out[id] = &c
 	}
 	return out
+}
+
+// ------------------------------------------------------------- API tokens
+
+// APITokens returns every API token's record, by ID.
+func (s *Store) APITokens() map[string]*APIToken {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]*APIToken, len(s.state.APITokens))
+	for id, t := range s.state.APITokens {
+		c := *t
+		out[id] = &c
+	}
+	return out
+}
+
+func (s *Store) PutAPIToken(id string, t *APIToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := *t
+	s.state.APITokens[id] = &c
+	return s.save()
+}
+
+func (s *Store) DeleteAPIToken(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.state.APITokens, id)
+	return s.save()
 }
 
 // --------------------------------------------------------------- sessions

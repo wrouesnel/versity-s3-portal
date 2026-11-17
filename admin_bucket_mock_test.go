@@ -17,7 +17,7 @@ func TestAdminBucketMock(t *testing.T) {
 	if out == "" {
 		t.Skip("MOCK_OUT not set")
 	}
-	s := NewServer(nil, nil, nil, nil, "S3 access keys", "https://s3.example.internal", "us-east-1")
+	s := NewServer(nil, nil, nil, nil, "", "https://s3.example.internal", "us-east-1")
 	created := time.Date(2026, 11, 16, 14, 30, 0, 0, time.UTC)
 	admin := &User{Name: "wrouesnel", UID: 1000, GID: 1000, Admin: true}
 	alice := &User{Name: "alice", UID: 1001, GID: 1001}
@@ -48,6 +48,13 @@ func TestAdminBucketMock(t *testing.T) {
 			KeyLabel: issued.Label, Grants: issued.Buckets, IssuedFor: "alice"}},
 		"admin-keys": {"admin.html", page{User: admin, Tab: "admin", Section: "keys", AllKeys: []KeyEntry{own, issued}, People: people}},
 		"alice-keys": {"keys.html", page{User: alice, Tab: "keys", Keys: []KeyEntry{own, issued}, KeyCaps: caps}},
+		"admin-tokens": {"admin.html", page{User: admin, Tab: "admin", Section: "tokens", People: people, ServerAPIToken: true, PortalURL: "https://s3.example.internal",
+			APITokens: []APITokenView{
+				{ID: "a1", Valid: true, APIToken: APIToken{Name: "migrator", Prefix: "s3p_Xy7Qa2", Created: created, By: "wrouesnel", LastUsed: created.Add(3 * time.Hour)}},
+				{ID: "b2", Valid: false, Reason: "carol is no longer an admin", APIToken: APIToken{Name: "user-sync", Prefix: "s3p_Lm3Rt9", Created: created.Add(-720 * time.Hour), By: "carol"}},
+			}}},
+		"admin-token-created": {"admin.html", page{User: admin, Tab: "admin", Section: "token-created", People: people, PortalURL: "https://s3.example.internal",
+			NewAPIToken: "s3p_Xy7Qa2mN4pR8sT1uV6wZ0bC3dF5gH9jK2", NewAPITokenName: "migrator"}},
 	}
 	if err := os.MkdirAll(filepath.Join(out, "static"), 0o755); err != nil {
 		t.Fatal(err)

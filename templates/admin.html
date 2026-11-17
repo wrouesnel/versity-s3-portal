@@ -8,6 +8,7 @@
         <li><a class="section" href="/admin?section=buckets"{{if or (eq .Section "buckets") (eq .Section "key-new")}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
         <li><a class="section" href="/admin?section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys <span class="count">{{len .AllKeys}}</span></a></li>
         <li><a class="section" href="/admin?section=mirrors"{{if or (eq .Section "mirrors") (eq .Section "mirror") (eq .Section "mirror-new") (eq .Section "server") (eq .Section "server-new")}} aria-current="page"{{end}}>Mirrors <span class="count">{{len .Mirrors}}</span></a></li>
+        <li><a class="section" href="/admin?section=tokens"{{if or (eq .Section "tokens") (eq .Section "token-created")}} aria-current="page"{{end}}>API tokens <span class="count">{{len .APITokens}}</span></a></li>
         {{if .ZFS}}<li><a class="section" href="/admin?section=trash"{{if eq .Section "trash"}} aria-current="page"{{end}}>Deleted buckets <span class="count">{{len .Trash}}</span></a></li>{{end}}
       </ul>
       <h2>Emergencies</h2>
@@ -226,6 +227,60 @@
       <p><button>Check the source and start</button> <a class="button ghost" href="/admin?section=mirrors">Cancel</a></p>
     </form>
     {{end}}
+
+    {{else if eq .Section "tokens"}}
+    <div class="pane-head"><h1>API tokens</h1>
+      <details class="menu">
+        <summary class="button">New API token…</summary>
+        <div class="pop">
+          <form method="post" action="/admin/tokens" autocomplete="off">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <label>Name it, for the tool it's for <input name="name" required maxlength="64" placeholder="migrator"></label>
+            <button>Issue the token</button>
+          </form>
+        </div>
+      </details>
+    </div>
+    <p class="muted small">A token lets a tool (a migrator, a user-management job) drive the admin API, <code>/api/</code>, as an admin: check and register people from the directory, make their buckets, issue and revoke their keys. It works while the admin who issued it is one, and its calls are recorded by its name: keys it issues are marked as issued by <code>api:NAME</code>. It's shown once, when it's issued. Issue one per tool, so each can be revoked on its own.</p>
+    {{if or .APITokens .ServerAPIToken}}
+    <div class="narrow-scroll"><table class="keys" id="admin-tokens">
+      <thead><tr><th data-sort="text">Name</th><th>Token</th><th data-sort="text">Issued</th><th data-sort="text">Last used</th><th class="actions"></th></tr></thead>
+      <tbody>
+      {{range .APITokens}}
+      <tr{{if not .Valid}} class="muted"{{end}}>
+        <td><strong>{{.Name}}</strong>{{if not .Valid}} <span class="pill warn" title="A token works only while the admin who issued it is one">not working: {{.Reason}}</span>{{end}}</td>
+        <td><code>{{.Prefix}}…</code></td>
+        <td class="small">{{.Created.Local.Format "2 Jan 2006 15:04"}} by {{.By}}</td>
+        <td class="small">{{if .LastUsed.IsZero}}<span class="muted">never</span>{{else}}{{.LastUsed.Local.Format "2 Jan 2006 15:04"}}{{end}}</td>
+        <td class="actions"><form method="post" action="/admin/tokens/revoke" data-confirm="Revoke the API token {{.Name}}? Whatever uses it stops working at once.">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}">
+          <button class="ghost small danger">Revoke…</button>
+        </form></td>
+      </tr>
+      {{end}}
+      {{if .ServerAPIToken}}
+      <tr>
+        <td><strong>The server's own</strong> <span class="pill">API_TOKEN</span></td>
+        <td colspan="4" class="small muted">Set where the portal is deployed (<code>API_TOKEN</code> or <code>API_TOKEN_FILE</code>), not here: it can't be shown or revoked from this page. Its calls are recorded as <code>api-token</code>.</td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table></div>
+    {{else}}
+    <p class="empty">No API tokens.</p>
+    {{end}}
+    {{template "apiUsage" $}}
+
+    {{else if eq .Section "token-created"}}
+    <div class="pane-head"><nav class="crumbs" aria-label="API tokens"><a href="/admin?section=tokens">API tokens</a><span class="sep">/</span><span aria-current="page">{{.NewAPITokenName}}</span></nav></div>
+    <p class="flash warning">Copy the token now. It isn't shown again. If you lose it, revoke it and issue another.</p>
+    <dl>
+      <dt>Token</dt><dd><code class="copy">{{.NewAPIToken}}</code></dd>
+      <dt>API</dt><dd><code class="copy">{{.PortalURL}}/api/</code></dd>
+    </dl>
+    <pre class="copy">export S3_PORTAL={{.PortalURL}} S3_PORTAL_TOKEN={{.NewAPIToken}}</pre>
+    {{template "apiUsage" $}}
+    <p><a class="button" href="/admin?section=tokens">Done</a></p>
 
     {{else if eq .Section "key-new"}}
     {{with .AdminKey}}
@@ -642,3 +697,20 @@
 </section>
 {{end}}
 {{end}}{{end}}
+
+{{define "apiUsage"}}
+<h2>What a token can do</h2>
+<p class="muted small">Each call is JSON, with <code>Authorization: Bearer $S3_PORTAL_TOKEN</code>. Errors answer <code>{"error": "..."}</code>.</p>
+<pre class="copy"># Would the directory let alice in? (records nothing)
+curl -fsS -H "Authorization: Bearer $S3_PORTAL_TOKEN" $S3_PORTAL/api/users/alice/directory
+# Register her from the directory, before she has logged in
+curl -fsS -X POST -H "Authorization: Bearer $S3_PORTAL_TOKEN" $S3_PORTAL/api/users/alice/register
+# Make her bucket ({"created": false} if it's hers already)
+curl -fsS -X POST -H "Authorization: Bearer $S3_PORTAL_TOKEN" -d '{"owner": "alice", "name": "home-alice"}' $S3_PORTAL/api/buckets
+# Issue her a key on it, to load data in: access_key and secret_key, given only now
+curl -fsS -X POST -H "Authorization: Bearer $S3_PORTAL_TOKEN" \
+  -d '{"owner": "alice", "label": "migration", "buckets": {"home-alice": "readwrite"}}' $S3_PORTAL/api/keys
+# Revoke it once the data is in
+curl -fsS -X DELETE -H "Authorization: Bearer $S3_PORTAL_TOKEN" $S3_PORTAL/api/keys/ACCESS_KEY</pre>
+<p class="muted small">Also: <code>GET /api/users/NAME</code>, <code>POST /api/users/NAME/check</code> and <code>POST /api/directory/sync</code>. The levels are <code>read</code>, <code>readwrite</code>, <code>createonly</code> and <code>writeonly</code>. See the portal's README, "API".</p>
+{{end}}
