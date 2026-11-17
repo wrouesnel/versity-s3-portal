@@ -392,7 +392,11 @@ Pages are plain server-rendered HTML and work without JavaScript. With it,
 prefetching a page while the pointer rests on its link. So moving around,
 creating buckets and deleting files don't reload the page, and back and
 forward keep their place. Uploads take a file or folder picker, or drag and
-drop, three files at a time. Static files are served under a content hash
+drop, three files at a time. A page that follows something running (a mirror's pass) keeps
+itself up to date without reloading: only its live parts (`data-live`) are fetched again and
+replaced, and one the user is in (focused, a menu open, a field changed) waits until they've
+left it, so their place, sort, filter, open menus and what they've typed stay as they left them
+(without the script, it reloads every 10 seconds). Static files are served under a content hash
 and cached for good. The gateway's bucket list is cached for 5 seconds and
 dropped whenever the portal creates or deletes a bucket. Grant checks always
 ask the gateway.

@@ -145,7 +145,7 @@
     {{if .Servers}}
     <h2>Servers</h2>
     <div class="table-scroll">
-    <table class="files" id="admin-servers">
+    <table class="files" id="admin-servers" data-live="servers">
       <thead><tr><th data-sort="text">Server</th><th data-sort="text">Endpoint</th><th data-sort="num">Buckets</th><th>Progress</th></tr></thead>
       <tbody>
       {{range .Servers}}
@@ -163,7 +163,7 @@
     {{end}}
     {{if .Mirrors}}
     <div class="table-scroll">
-    <table class="files" id="admin-mirrors">
+    <table class="files" id="admin-mirrors" data-live="mirrors">
       <thead><tr><th data-sort="text">Bucket</th><th data-sort="text">Source</th>{{if $.Servers}}<th data-sort="text">From</th>{{end}}<th data-sort="text">Owner</th><th data-sort="text">State</th><th>Last pass</th></tr></thead>
       <tbody>
       {{range .Mirrors}}
@@ -443,7 +443,7 @@
 {{define "mirrorPage"}}{{with .Mirror}}{{$m := .}}
 <div class="pane-head">
   <nav class="crumbs" aria-label="Mirror"><a href="/admin?section=mirrors">Mirrors</a><span class="sep">/</span><a href="/admin/mirror?bucket={{.Bucket}}" aria-current="page">{{.Bucket}}</a></nav>
-  <div class="row compact toolbar">
+  <div class="row compact toolbar" data-live="mirror-toolbar">
     <a class="button ghost" href="/files?bucket={{.Bucket}}">Browse {{.Bucket}}</a>
     {{if .Active}}<details class="menu row-menu">
       <summary class="button ghost actions-button">Actions</summary>
@@ -461,18 +461,20 @@
 </div>
 <p class="muted">From <code>{{.Source.Label}}</code>{{if .Source.Virtual}} (virtual-hosted){{end}}, as {{.Owner}}. {{if .Active}}Passes run {{if .Every}}{{.Every}}{{else}}only by hand{{end}}{{if .LimitMBps}}, at up to {{.LimitMBps}} MB/s{{end}}.{{end}}</p>
 
+<div data-live="mirror-status">
 {{if .Running}}{{with .Running}}
 <div class="flash notice mirror-running" role="status">
   <strong>{{if eq .Kind "final"}}Final pass{{else if eq .Kind "final-deep"}}Final pass with deep check{{else}}Pass{{end}} running</strong>, {{.Phase}}, for {{since .Started}}:
   {{.Listed}} listed ({{humanSize .ListedBytes}}), {{.Copied}} copied ({{humanSize .CopiedBytes}}), {{.Deleted}} deleted{{if .Failed}}, <span class="pill warn">{{.Failed}} failed</span>{{end}}{{if .Checked}}, {{.Checked}} checked{{end}}.
-  <span class="muted small">This page reloads itself.</span>
+  <span class="muted small">This page keeps itself up to date.</span>
 </div>
 {{end}}{{end}}
 
 {{if eq .State "abandoned"}}<p class="flash warning">This mirror was abandoned. {{.Bucket}} kept what had been copied.</p>{{end}}
+</div>
 
 <div class="mirror-grid">
-<section>
+<section data-live="mirror-steps">
   <h2>Steps</h2>
   <ol class="checklist">
     {{range .Steps}}
@@ -492,7 +494,7 @@
   {{end}}
 </section>
 
-<section>
+<section data-live="mirror-actions">
   {{if and (not .Running) (or (eq .State "syncing") (eq .State "synced") (eq .State "freezing") (eq .State "verified"))}}
   {{if ne .State "verified"}}
   <h2>{{if eq .State "freezing"}}Run the final pass again{{else}}Freeze the source and run the final pass{{end}}</h2>
@@ -544,6 +546,7 @@
 </section>
 </div>
 
+<div data-live="mirror-report">
 {{with .Report}}{{$r := .}}
 {{if or .Uncopyable .Failures .Unexpected}}
 <h2>Problems in pass {{.Summary.N}}</h2>
@@ -597,12 +600,12 @@
 </table>
 </div>
 {{end}}
+</div>
 {{end}}{{end}}
-
 {{define "serverPage"}}{{with .Server}}{{$sv := .}}
 <div class="pane-head"><nav class="crumbs" aria-label="Mirrors"><a href="/admin?section=mirrors">Mirrors</a><span class="sep">/</span><a href="/admin/server?id={{.ID}}" aria-current="page">{{.Name}}</a></nav></div>
 <p class="small"><code>{{.Source.Endpoint}}</code>{{if .Source.Virtual}}, virtual-hosted{{end}}, region {{.Source.Region}}. Key <code>{{.Source.Access}}</code>{{if not .HasSecret}} <span class="pill warn">secret forgotten</span>{{end}}. New buckets are {{.DefaultOwner}}'s; passes run {{if .Every}}{{.Every}}{{else}}only by hand{{end}}{{if .LimitMBps}}, at most {{.LimitMBps}} MB/s each{{end}}.</p>
-<p class="small">{{len .Mirrors}} {{if eq (len .Mirrors) 1}}bucket{{else}}buckets{{end}} mirrored:
+<p class="small" data-live="server-summary">{{len .Mirrors}} {{if eq (len .Mirrors) 1}}bucket{{else}}buckets{{end}} mirrored:
   {{if .Syncing}}<span class="pill readwrite">{{.Syncing}} syncing</span> {{end}}
   {{if .Synced}}<span class="pill ok">{{.Synced}} synced</span> {{end}}
   {{if .Freezing}}<span class="pill write">{{.Freezing}} freezing</span> {{end}}
@@ -611,7 +614,7 @@
 </p>
 
 {{if .Mirrors}}
-<div class="row server-actions">
+<div class="row server-actions" data-live="server-actions">
   <form method="post" action="/admin/server/run"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="ghost small"{{if not (or .Syncing .Synced)}} disabled{{end}}>Run a pass of each</button></form>
   <form method="post" action="/admin/server/pause"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="paused" value="on"><button class="ghost small"{{if not .Active}} disabled{{end}}>Pause all</button></form>
   <form method="post" action="/admin/server/pause"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="ghost small"{{if not .Active}} disabled{{end}}>Resume all</button></form>
@@ -643,7 +646,7 @@
 
 <h2>Mirrored</h2>
 <div class="table-scroll">
-<table class="files" id="server-mirrors">
+<table class="files" id="server-mirrors" data-live="server-mirrors">
   <thead><tr><th data-sort="text">Bucket here</th><th data-sort="text">On the server</th><th data-sort="text">Owner</th><th data-sort="text">State</th><th>Last pass</th></tr></thead>
   <tbody>
   {{range .Mirrors}}

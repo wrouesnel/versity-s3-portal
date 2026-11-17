@@ -72,7 +72,9 @@ function showError(msg) {
 function swap(html) {
   const doc = new DOMParser().parseFromString(html, "text/html");
   // A page that redirects onward itself (the post-login step) gets a real load.
-  if (doc.querySelector("meta[http-equiv=refresh]")) return false;
+  // (A page that refreshes itself has its refresh in <noscript>, for browsers
+  // without this script: with it, refreshLive keeps the page up to date.)
+  if (doc.querySelector("meta[http-equiv=refresh][data-redirect]")) return false;
   document.title = doc.title;
   // The bucket list keeps its place and filter; the admin section list has
   // no filter.
@@ -94,6 +96,7 @@ function swap(html) {
 
 // navigate loads url (or submits a form to it) in place.
 async function navigate(url, { method = "GET", body = null, push = true, keepScroll = false, scrollY = null } = {}) {
+  clearTimeout(liveTimer);
   if (current) current.abort();
   const ctl = new AbortController();
   current = ctl;
@@ -303,9 +306,13 @@ document.addEventListener("keydown", (ev) => {
 document.addEventListener("click", (ev) => {
   const th = ev.target.closest && ev.target.closest("th[data-sort]");
   if (!th) return;
+  sortTable(th, th.getAttribute("aria-sort") === "ascending" ? -1 : 1);
+});
+
+// sortTable sorts th's table by its column, ascending (1) or descending (-1).
+function sortTable(th, dir) {
   const table = th.closest("table");
   const col = [...th.parentElement.children].indexOf(th);
-  const dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1;
   for (const h of th.parentElement.children) h.removeAttribute("aria-sort");
   th.setAttribute("aria-sort", dir === 1 ? "ascending" : "descending");
   const num = th.dataset.sort === "num";
@@ -315,11 +322,88 @@ document.addEventListener("click", (ev) => {
     return num ? Number(v) || 0 : v.toLowerCase();
   };
   const body = table.tBodies[0];
+  if (!body) return;
   const rows = [...body.rows].sort((a, b) => {
     const x = key(a), y = key(b);
     return (x < y ? -1 : x > y ? 1 : 0) * dir;
   });
   body.append(...rows);
+}
+
+// ----------------------------------------------------------- live refresh
+
+// A page with data-refresh (a mirror pass running) is fetched again every
+// data-refresh seconds, and only its live parts ([data-live]) replaced:
+// nothing else on the page changes, so menus, what's typed and ticked,
+// scrolling, and a table's sort and filter stay as the user left them. A
+// live part the user is in (focused, a menu or panel open, a field changed)
+// is left until they're out of it. It fetches the page shown now, never
+// the one first loaded, and stops once the page no longer refreshes.
+let liveTimer = null;
+
+function scheduleLive() {
+  clearTimeout(liveTimer);
+  const secs = Number(document.body.dataset.refresh || 0);
+  if (secs > 0) liveTimer = setTimeout(refreshLive, secs * 1000);
+}
+
+// inUse is whether the user is in a live part: focused in it, a menu or
+// panel open in it, or a field in it changed.
+function inUse(el) {
+  const active = document.activeElement;
+  if (active && active !== document.body && el.contains(active)) return true;
+  if (el.querySelector("details[open]")) return true;
+  for (const f of el.querySelectorAll("input, select, textarea")) {
+    if (f.type === "checkbox" || f.type === "radio") {
+      if (f.checked !== f.defaultChecked) return true;
+    } else if (f.tagName === "SELECT") {
+      if ([...f.options].some((o) => o.selected !== o.defaultSelected)) return true;
+    } else if (f.value !== f.defaultValue) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function refreshLive() {
+  const url = location.href;
+  if (document.hidden || current) return scheduleLive();
+  let res;
+  try {
+    res = await load(url);
+  } catch {
+    return scheduleLive();
+  }
+  // Moved on meanwhile, or not a page: try again later, at the page shown.
+  if (location.href !== url || current || res.html === undefined || res.redirected) return scheduleLive();
+  const doc = new DOMParser().parseFromString(res.html, "text/html");
+  for (const el of document.querySelectorAll("[data-live]")) {
+    const fresh = doc.querySelector(`[data-live="${CSS.escape(el.dataset.live)}"]`);
+    if (!fresh || inUse(el)) continue;
+    // Each table's sort, by column and direction, to put back.
+    const sorts = [el, ...el.querySelectorAll("table")].filter((t) => t.tagName === "TABLE").map((t) => {
+      const th = t.querySelector("th[aria-sort]");
+      return th && { col: [...th.parentElement.children].indexOf(th), dir: th.getAttribute("aria-sort") === "ascending" ? 1 : -1 };
+    });
+    const node = document.adoptNode(fresh);
+    el.replaceWith(node);
+    const tables = [node, ...node.querySelectorAll("table")].filter((t) => t.tagName === "TABLE");
+    tables.forEach((t, i) => {
+      const s = sorts[i];
+      const th = s && t.tHead && t.tHead.rows[0] && t.tHead.rows[0].children[s.col];
+      if (th && th.hasAttribute("data-sort")) sortTable(th, s.dir);
+    });
+  }
+  // The filters, over the rows as they are now.
+  for (const f of document.querySelectorAll("input.table-filter")) if (f.value) f.dispatchEvent(new Event("input", { bubbles: true }));
+  addCopyButtons();
+  document.title = doc.title;
+  document.body.dataset.refresh = doc.body.dataset.refresh || "";
+  scheduleLive();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && document.body.dataset.refresh) scheduleLive();
 });
 
 // A search box with data-table filters that table's rows by their text.
@@ -579,6 +663,7 @@ document.addEventListener("keydown", (ev) => {
 });
 
 function enhance() {
+  scheduleLive();
   addCopyButtons();
   for (const ed of document.querySelectorAll("[data-grants]")) if (ed.querySelector("table.grants")) syncGrants(ed);
   for (const f of document.querySelectorAll("input.table-filter")) if (f.value) f.dispatchEvent(new Event("input", { bubbles: true }));
