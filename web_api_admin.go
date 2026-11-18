@@ -78,19 +78,25 @@ func (s *Server) apiEnsureBucket(r *http.Request) (any, error) {
 }
 
 // APIKeyRequest asks for a key for someone on their buckets, as the admin page's "issue a
-// key to load data" does.
+// key to load data" does. With AccessKey and SecretKey, it imports a key from another S3
+// server instead (see Portal.ImportKeyFor), so its clients keep working.
 type APIKeyRequest struct {
-	Owner   string          `json:"owner"`
-	Label   string          `json:"label"`
-	Buckets map[string]Perm `json:"buckets"`
+	Owner     string          `json:"owner"`
+	Label     string          `json:"label"`
+	Buckets   map[string]Perm `json:"buckets"`
+	AccessKey string          `json:"access_key,omitempty"`
+	SecretKey string          `json:"secret_key,omitempty"`
 }
 
-// APIKeyResult is an issued key. The secret is given only here.
+// APIKeyResult is an issued key. The secret is given only here, and not for an imported
+// key, whose caller has it. Existing is an imported key which was already, unchanged.
 type APIKeyResult struct {
 	Owner     string          `json:"owner"`
 	AccessKey string          `json:"access_key"`
-	SecretKey string          `json:"secret_key"`
+	SecretKey string          `json:"secret_key,omitempty"`
 	Buckets   map[string]Perm `json:"buckets"`
+	Imported  bool            `json:"imported,omitempty"`
+	Existing  bool            `json:"existing,omitempty"`
 }
 
 func (s *Server) apiIssueKey(r *http.Request) (any, error) {
@@ -106,6 +112,16 @@ func (s *Server) apiIssueKey(r *http.Request) (any, error) {
 	label := strings.TrimSpace(req.Label)
 	if label == "" {
 		label = "Issued by " + apiCaller(r).Name
+	}
+	if req.AccessKey != "" || req.SecretKey != "" {
+		if req.AccessKey == "" || req.SecretKey == "" {
+			return nil, userErr("Give both access_key and secret_key to import a key, or neither for a new one.")
+		}
+		existing, err := s.Portal.ImportKeyFor(r.Context(), apiCaller(r), req.Owner, label, req.Buckets, req.AccessKey, req.SecretKey)
+		if err != nil {
+			return nil, err
+		}
+		return APIKeyResult{Owner: strings.TrimSpace(req.Owner), AccessKey: req.AccessKey, Buckets: req.Buckets, Imported: true, Existing: existing}, nil
 	}
 	access, secret, err := s.Portal.CreateKeyFor(r.Context(), apiCaller(r), req.Owner, label, req.Buckets)
 	if err != nil {

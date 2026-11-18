@@ -1,8 +1,11 @@
 # Design: moving from MinIO
 
-Status: proposal, not built. The copying in the steps below is now
-designed as a portal feature, with the steps and checks shown in the
-admin page: see `design-bucket-mirror.md`. For a small number of users and buckets,
+Status: built, except several hostnames in the portal and virtual-hosted
+style. The copying in the steps below is a portal feature, the server
+mirror, with the steps and checks shown in the admin page: see
+`design-bucket-mirror.md`. Importing the keys, and checking the server is
+ready for MinIO's hostname before DNS moves, is `s3-portal-minio`: see
+`minio-keys.md`, the procedure. For a small number of users and buckets,
 the **one-off migration** below is the recommended path. **Pull-through
 mirroring** is written up for the record, in case a migration ever has to
 happen with no downtime at all.
@@ -85,8 +88,18 @@ plus the DNS switch.
 
 ## Importing keys
 
-This is the one piece a migration needs built. It's also useful on its
-own, for example when moving people over from another gateway.
+Built as `s3-portal-minio` and the admin API's key import: see
+`minio-keys.md`. What was found building it:
+
+- `mc admin cluster iam export` isn't in every MinIO version. The tool reads
+  the records from the drive instead, where every secret is: plain JSON
+  since 2022, encrypted with the root credentials before.
+- Clients sign for MinIO's region, and the gateway refuses another: the
+  gateway must have MinIO's (on sde-s3, `s3.region`).
+- MinIO's built-in `readonly` gets without listing, which no level here
+  matches: it's noted, not widened to `read`.
+
+The design, as proposed:
 
 - **Where it comes from.** An admin-only page (or a CLI) takes a MinIO
   IAM export.

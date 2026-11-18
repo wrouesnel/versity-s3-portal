@@ -795,7 +795,7 @@ func cleanLabel(label string) (string, error) {
 // CreateKey issues a new access key for u and returns its secret, which
 // isn't shown again.
 func (p *Portal) CreateKey(ctx context.Context, u User, label string, grants map[string]Perm) (string, string, error) {
-	return p.createKey(ctx, u, label, grants, "")
+	return p.createKey(ctx, u, label, grants, "", "", "")
 }
 
 // CreateBucketFor makes a bucket owned by someone else, for admins: as
@@ -830,7 +830,48 @@ func (p *Portal) CreateKeyFor(ctx context.Context, admin User, owner, label stri
 	if len(grants) == 0 {
 		return "", "", userErr("Pick the buckets the key is for.")
 	}
-	return p.createKey(ctx, person.User(owner), label, grants, admin.Name)
+	return p.createKey(ctx, person.User(owner), label, grants, admin.Name, "", "")
+}
+
+// importedKeyRe is what an imported key's ID may be: what S3 clients send
+// unescaped (MinIO's keys, and its users' names, which are their keys), and
+// what the portal's URLs can carry.
+var importedKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+=-]{2,127}$`)
+
+// ImportKeyFor is CreateKeyFor with the key's ID and secret given, for admins moving keys
+// from another S3 server (as a MinIO's), so its clients keep working unchanged. An ID the
+// gateway has already is refused, unless it's this key, imported before: the same owner,
+// and the same secret, when it changes nothing and existing is true. The secret is given
+// only to the gateway, which keeps every key's.
+func (p *Portal) ImportKeyFor(ctx context.Context, admin User, owner, label string, grants map[string]Perm, access, secret string) (existing bool, err error) {
+	if err := requireAdmin(admin); err != nil {
+		return false, err
+	}
+	person, err := p.knownPerson(owner)
+	if err != nil {
+		return false, err
+	}
+	if len(grants) == 0 {
+		return false, userErr("Pick the buckets the key is for.")
+	}
+	if !importedKeyRe.MatchString(access) || strings.HasPrefix(access, webPrefix) || access == p.vgw.Creds.AccessKeyID {
+		return false, userErr("%q can't be imported as an access key ID: it must be 3 to 128 letters, digits and ._@+=-, and not one the portal uses itself.", access)
+	}
+	if len(secret) < 8 || len(secret) > 128 || strings.ContainsFunc(secret, func(r rune) bool { return r <= ' ' || r > '~' }) {
+		return false, userErr("The secret for %s must be 8 to 128 printable characters, without spaces.", access)
+	}
+	if k, ok := p.store.Get(access); ok {
+		if k.Owner == strings.TrimSpace(owner) {
+			if p.secretWorks(ctx, access, secret) {
+				return true, nil
+			}
+		}
+		return false, userErr("%s is already a key of the portal's, with another owner or secret: it isn't imported again.", access)
+	}
+	if _, _, err := p.createKey(ctx, person.User(owner), label, grants, admin.Name, access, secret); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // knownPerson is someone the portal knows, who may own buckets and keys.
@@ -845,7 +886,27 @@ func (p *Portal) knownPerson(name string) (*Person, error) {
 	return person, nil
 }
 
-func (p *Portal) createKey(ctx context.Context, u User, label string, grants map[string]Perm, issuedBy string) (string, string, error) {
+// secretWorks is whether the gateway takes secret as access's: it answers a request signed
+// with it, even if only to refuse what was asked (AccessDenied comes after the signature is
+// checked).
+func (p *Portal) secretWorks(ctx context.Context, access, secret string) bool {
+	_, err := p.vgw.As(access, secret).ListBuckets(ctx)
+	var apiErr *APIError
+	if err == nil {
+		return true
+	}
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Code {
+	case "SignatureDoesNotMatch", "InvalidAccessKeyId", "AuthorizationHeaderMalformed", "":
+		return false
+	}
+	return true
+}
+
+// createKey issues a key: a new one, or with access and secret given, an imported one.
+func (p *Portal) createKey(ctx context.Context, u User, label string, grants map[string]Perm, issuedBy, access, secret string) (string, string, error) {
 	label, err := cleanLabel(label)
 	if err != nil {
 		return "", "", err
@@ -856,7 +917,20 @@ func (p *Portal) createKey(ctx context.Context, u User, label string, grants map
 		return "", "", err
 	}
 
-	access, secret := newAccessKey(), newSecret()
+	if access == "" {
+		access, secret = newAccessKey(), newSecret()
+	} else {
+		// Imported: an ID the gateway has already (another's key, a web account) is refused.
+		accounts, err := p.vgw.ListAccounts(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		for _, a := range accounts {
+			if a.Access == access {
+				return "", "", userErr("The gateway already has an account %s: it isn't imported.", access)
+			}
+		}
+	}
 	if err := p.vgw.CreateAccount(ctx, Account{
 		Access: access, Secret: secret, Role: "user", UserID: u.UID, GroupID: u.GID,
 	}); err != nil {

@@ -52,10 +52,22 @@ github.com/go-ldap/ldap/v3
 # github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
+# github.com/secure-io/sio-go v0.3.1
+## explicit; go 1.13
+github.com/secure-io/sio-go
 # golang.org/x/crypto v0.54.0
 ## explicit; go 1.25.0
+golang.org/x/crypto/argon2
+golang.org/x/crypto/blake2b
+golang.org/x/crypto/chacha20
+golang.org/x/crypto/chacha20poly1305
+golang.org/x/crypto/internal/alias
+golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/md4
 # golang.org/x/oauth2 v0.37.0
 ## explicit; go 1.26.0
 golang.org/x/oauth2
 golang.org/x/oauth2/internal
+# golang.org/x/sys v0.47.0
+## explicit; go 1.25.0
+golang.org/x/sys/cpu

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,6 +153,52 @@ func TestAdminAPIAgainstGateway(t *testing.T) {
 	denied(t, "the revoked key", putObject(ctx, s3, bucket, "after.txt", "x"))
 	if c := call("DELETE", "/api/keys/"+key.AccessKey, "", nil); c != http.StatusOK {
 		t.Fatalf("revoke again: %d", c)
+	}
+
+	// Importing a key from another server: its ID and secret kept, so its clients work.
+	imp := "SVCIMPORT" + strings.ToUpper(suffix)
+	impSecret := "imported-secret-" + suffix
+	body := func(owner, access, secret string) string {
+		return `{"owner":"` + owner + `","label":"MinIO: backup-bot","buckets":{"` + bucket + `":"read"},"access_key":"` + access + `","secret_key":"` + secret + `"}`
+	}
+	var imported APIKeyResult
+	if c := call("POST", "/api/keys", body(alice, imp, impSecret), &imported); c != http.StatusOK || !imported.Imported || imported.Existing || imported.SecretKey != "" {
+		t.Fatalf("import a key: %d %+v", c, imported)
+	}
+	t.Cleanup(func() { root.DeleteAccount(ctx, imp) })
+	if k, _ := store.Get(imp); k == nil || k.Owner != alice || k.Label != "MinIO: backup-bot" || k.IssuedBy != apiTokenAdmin.Name {
+		t.Fatalf("the imported key as recorded: %+v", k)
+	}
+	if got, err := getObject(ctx, as(root, imp, impSecret), bucket, "ws1/alice.tar.gz"); err != nil || got != "data" {
+		t.Fatalf("read with the imported key: %q %v", got, err)
+	}
+	denied(t, "write with a read-only imported key", putObject(ctx, as(root, imp, impSecret), bucket, "no.txt", "x"))
+	if c := call("POST", "/api/keys", body(alice, imp, impSecret), &imported); c != http.StatusOK || !imported.Existing {
+		t.Fatalf("import it again: %d %+v", c, imported)
+	}
+	if state, _ := os.ReadFile(store.path); strings.Contains(string(state), impSecret) {
+		t.Fatal("the imported secret is in the portal's state")
+	}
+	var live APIKeyResult
+	call("POST", "/api/keys", `{"owner":"`+alice+`","label":"live","buckets":{"`+bucket+`":"read"}}`, &live)
+	other := "OTHER" + strings.ToUpper(suffix)
+	ok(t, "a gateway account the portal doesn't know", root.CreateAccount(ctx, Account{Access: other, Secret: "othersecret123", Role: "user", UserID: 2001, GroupID: 2001}))
+	t.Cleanup(func() { root.DeleteAccount(ctx, other) })
+	for what, b := range map[string]string{
+		"with another secret":             body(alice, imp, "another-secret-1"),
+		"for another owner":               body(bob, imp, impSecret),
+		"over the portal's own key":       body(alice, live.AccessKey, impSecret),
+		"over another gateway account":    body(alice, other, impSecret),
+		"as a web account":                body(alice, "web."+alice, impSecret),
+		"as the root account":             body(alice, root.Creds.AccessKeyID, impSecret),
+		"with an ID URLs can't carry":     body(alice, "a/b/c", impSecret),
+		"with a short secret":             body(alice, "NEW"+imp, "short"),
+		"with a secret and no ID":         body(alice, "", impSecret),
+		"on a bucket the owner can't use": strings.Replace(body(bob, "NEW"+imp, impSecret), bucket, "nosuch-"+suffix, 1),
+	} {
+		if c := call("POST", "/api/keys", b, nil); c != http.StatusBadRequest {
+			t.Errorf("import %s: %d", what, c)
+		}
 	}
 
 	// Without the token, none of it.

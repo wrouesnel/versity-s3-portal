@@ -207,6 +207,12 @@ they pick.
     "buckets": {"home-alice": "readwrite"}}` issues them a key, as the admin
     page does, and answers with `access_key` and `secret_key`, given only
     then. The levels are `read`, `readwrite`, `createonly` and `writeonly`.
+    With `access_key` and `secret_key` too, it imports a key from another S3
+    server with that ID and secret, so its clients keep working, and answers
+    `{"imported": true}` without the secret. An ID the gateway has already is
+    refused, unless it's this key imported before, with the same owner and
+    secret (`{"existing": true}`, unchanged). IDs are 3 to 128 letters,
+    digits and `._@+=-`; secrets 8 to 128 printable characters.
   - `DELETE /api/keys/<access key>` revokes it. A key already gone counts as
     revoked.
 
@@ -292,6 +298,14 @@ they pick.
     Passes asked for at once are queued, two running at a time. Listing the
     server again finds buckets made there since.
   - See `docs/design-bucket-mirror.md`.
+- **Moving from MinIO:** `s3-portal-minio` (`cmd/s3-portal-minio`, run
+  outside the portal) reads a MinIO server's users, service accounts and
+  policies from its drive, secrets too, and plans their keys' owners and
+  grants for an admin to review. It then imports them over the admin API
+  with their IDs and secrets, so clients keep working, and checks the
+  portal's server answers for MinIO's hostname with a trusted certificate,
+  an imported key and MinIO's region, before and after DNS moves. See
+  `docs/minio-keys.md`.
 - **State:** `STATE_FILE` is a JSON file with each key's owner, name and
   grants, bucket group grants, everyone the portal knows, sessions, web
   account credentials, and mirrors, with their source keys until each
