@@ -25,6 +25,18 @@ type Key struct {
 	// into their buckets, as a migration), if one did: shown to the owner,
 	// who may revoke it.
 	IssuedBy string `json:"issuedBy,omitempty"`
+	// Expires is when the portal deletes the key; nil never (keys made before
+	// expiry existed, imported ones, and those an admin made never to expire).
+	Expires *time.Time `json:"expires,omitempty"`
+	// NeverBy is the admin who made the key never expire, if one did.
+	NeverBy string `json:"neverBy,omitempty"`
+	// Login is a key s3-portal login made: it reaches everything its owner can,
+	// following their access, unless it was asked for Buckets. Computer is the
+	// one it was made for, as the command named it.
+	Login    bool   `json:"login,omitempty"`
+	Computer string `json:"computer,omitempty"`
+	// LogoutHash is the hash of the token a login key's command revokes it with.
+	LogoutHash string `json:"logoutHash,omitempty"`
 }
 
 // WebAccount is the gateway account the portal acts as for someone in the
@@ -114,6 +126,8 @@ type state struct {
 	Servers map[string]*ServerMirror `json:"servers,omitempty"`
 	// APITokens are the API tokens admins issued, by ID: their hashes only.
 	APITokens map[string]*APIToken `json:"apiTokens,omitempty"`
+	// KeyPolicy is how long keys last, as an admin set it (DefaultKeyPolicy until one does).
+	KeyPolicy *KeyPolicy `json:"keyPolicy,omitempty"`
 }
 
 // Store is a JSON file of the portal's state. Each method is safe to call
@@ -195,6 +209,10 @@ func (s *Store) save() error {
 
 func copyKey(k *Key) *Key {
 	c := *k
+	if k.Expires != nil {
+		e := *k.Expires
+		c.Expires = &e
+	}
 	c.Buckets = make(map[string]Perm, len(k.Buckets))
 	for b, p := range k.Buckets {
 		c.Buckets[b] = p
@@ -286,6 +304,37 @@ func (s *Store) Grants(bucket string) map[string]KeyGrant {
 		}
 	}
 	return out
+}
+
+// LoginKeys are the login keys which reach everything their owner can (asked for no
+// buckets): their owners, by access key.
+func (s *Store) LoginKeys() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]string{}
+	for access, k := range s.state.Keys {
+		if k.Login && len(k.Buckets) == 0 {
+			out[access] = k.Owner
+		}
+	}
+	return out
+}
+
+// KeyPolicy is how long keys last.
+func (s *Store) KeyPolicy() KeyPolicy {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.KeyPolicy == nil {
+		return DefaultKeyPolicy
+	}
+	return *s.state.KeyPolicy
+}
+
+func (s *Store) PutKeyPolicy(p KeyPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.KeyPolicy = &p
+	return s.save()
 }
 
 // KeyGrant is one key's request for access to a bucket.

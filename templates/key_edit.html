@@ -7,6 +7,13 @@
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="access" value="{{.KeyAccess}}">
     <label>Name <input name="label" value="{{.KeyLabel}}" maxlength="64" required></label>
+    <fieldset class="choices"><legend>Expiry</legend>
+      <p>{{if .KeyExpires}}It {{expiry .KeyExpires}}, on {{.KeyExpires.Format "2 Jan 2006 at 15:04 MST"}}.{{else}}It never expires{{if .KeyNeverBy}}: {{.KeyNeverBy}}, an admin, made it so{{else}}: it was made before keys expired{{end}}.{{end}}</p>
+      <label class="check"><input type="radio" name="renew" value="" checked> Leave it</label>
+      <label class="check"><input type="radio" name="renew" value="yes"> Renew it, from now, for
+        <select name="lifetime">{{range .Lifetimes}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+      <p class="muted small">Renewing keeps its ID and secret, so nothing using it needs changing.</p>
+    </fieldset>
     <h2>Buckets</h2>
     {{template "grants" .}}
     <p class="row"><button>Save</button> <a class="button ghost" href="/keys">Cancel</a></p>

@@ -5,9 +5,17 @@
   <form method="post" action="/keys">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label>Name <input name="label" value="{{.KeyLabel}}" maxlength="64" placeholder="e.g. laptop backups" required autofocus></label>
+    {{template "lifetime" .}}
     <h2>Buckets</h2>
     {{template "grants" .}}
     <p class="row"><button>Create key</button> <a class="button ghost" href="/keys">Cancel</a></p>
   </form>
 </section>
 {{template "footer" .}}
+
+{{define "lifetime"}}
+    <label>Expires after
+      <select name="lifetime">{{range .Lifetimes}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+    </label>
+    <p class="muted small">The key stops working then, and is deleted. Renew it before then (Edit) to keep it, with the same ID and secret.</p>
+{{end}}

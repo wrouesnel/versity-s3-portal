@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // apiCallerKey holds, in an API request's context, who made the call.
@@ -86,6 +87,9 @@ type APIKeyRequest struct {
 	Buckets   map[string]Perm `json:"buckets"`
 	AccessKey string          `json:"access_key,omitempty"`
 	SecretKey string          `json:"secret_key,omitempty"`
+	// Lifetime is how long it lasts: "12h", "30d", "2w" or "never"; by default the Access
+	// keys page's default, or never for an imported key.
+	Lifetime string `json:"lifetime,omitempty"`
 }
 
 // APIKeyResult is an issued key. The secret is given only here, and not for an imported
@@ -97,6 +101,8 @@ type APIKeyResult struct {
 	Buckets   map[string]Perm `json:"buckets"`
 	Imported  bool            `json:"imported,omitempty"`
 	Existing  bool            `json:"existing,omitempty"`
+	// Expires is when it expires; absent if it never does.
+	Expires *time.Time `json:"expires,omitempty"`
 }
 
 func (s *Server) apiIssueKey(r *http.Request) (any, error) {
@@ -117,17 +123,26 @@ func (s *Server) apiIssueKey(r *http.Request) (any, error) {
 		if req.AccessKey == "" || req.SecretKey == "" {
 			return nil, userErr("Give both access_key and secret_key to import a key, or neither for a new one.")
 		}
-		existing, err := s.Portal.ImportKeyFor(r.Context(), apiCaller(r), req.Owner, label, req.Buckets, req.AccessKey, req.SecretKey)
+		existing, err := s.Portal.ImportKeyFor(r.Context(), apiCaller(r), req.Owner, label, req.Buckets, req.AccessKey, req.SecretKey, req.Lifetime)
 		if err != nil {
 			return nil, err
 		}
-		return APIKeyResult{Owner: strings.TrimSpace(req.Owner), AccessKey: req.AccessKey, Buckets: req.Buckets, Imported: true, Existing: existing}, nil
+		k, _ := s.Portal.store.Get(req.AccessKey)
+		return APIKeyResult{Owner: strings.TrimSpace(req.Owner), AccessKey: req.AccessKey, Buckets: req.Buckets, Imported: true, Existing: existing, Expires: keyExpires(k)}, nil
 	}
-	access, secret, err := s.Portal.CreateKeyFor(r.Context(), apiCaller(r), req.Owner, label, req.Buckets)
+	access, secret, err := s.Portal.CreateKeyForLasting(r.Context(), apiCaller(r), req.Owner, label, req.Buckets, req.Lifetime)
 	if err != nil {
 		return nil, err
 	}
-	return APIKeyResult{Owner: strings.TrimSpace(req.Owner), AccessKey: access, SecretKey: secret, Buckets: req.Buckets}, nil
+	k, _ := s.Portal.store.Get(access)
+	return APIKeyResult{Owner: strings.TrimSpace(req.Owner), AccessKey: access, SecretKey: secret, Buckets: req.Buckets, Expires: keyExpires(k)}, nil
+}
+
+func keyExpires(k *Key) *time.Time {
+	if k == nil {
+		return nil
+	}
+	return k.Expires
 }
 
 func (s *Server) apiRevokeKey(r *http.Request) (any, error) {

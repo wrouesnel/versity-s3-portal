@@ -51,6 +51,8 @@ type Server struct {
 	TrustedProxies []netip.Prefix
 	tmpl           *template.Template
 	failedWait     time.Duration
+	// cli are s3-portal logins waiting to be approved, or for their key.
+	cli *cliLogins
 	// assetPrefix is /static/<hash of the static files>/, so they can be
 	// cached for good and still change with each release.
 	assetPrefix string
@@ -64,9 +66,13 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 		"capsLabel": capsLabel,
 		"perms":     func() []Perm { return Perms },
 		// covers says whether access c allows level p.
-		"covers":    func(c Caps, p Perm) bool { return c.Covers(p.Caps()) },
-		"humanSize": humanSize,
-		"add":       func(a, b int) int { return a + b },
+		"covers":         func(c Caps, p Perm) bool { return c.Covers(p.Caps()) },
+		"humanSize":      humanSize,
+		"expiry":         expiryLabel,
+		"soon":           expiringSoon,
+		"lifetime":       lifetimeLabel,
+		"formatLifetime": formatLifetime,
+		"add":            func(a, b int) int { return a + b },
 		// within shows a key or folder relative to the folder being browsed.
 		"within": func(prefix, key string) string { return strings.TrimPrefix(key, prefix) },
 		// folderName is a subfolder's name without its trailing slash.
@@ -123,7 +129,7 @@ func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions 
 	return &Server{
 		Portal: portal, Auth: auth, OIDC: oidcAuth, Sessions: sessions,
 		Title: title, S3URL: s3URL, Region: region,
-		tmpl: tmpl, failedWait: time.Second, assetPrefix: assetPrefix,
+		tmpl: tmpl, failedWait: time.Second, assetPrefix: assetPrefix, cli: &cliLogins{reqs: map[string]*cliRequest{}},
 	}
 }
 
@@ -163,6 +169,12 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /auth/callback", s.oidcCallback)
 	}
 	mux.HandleFunc("POST /logout", s.authed(s.logout))
+	// s3-portal login: the command's calls, and the page approving it.
+	mux.HandleFunc("POST /api/login/start", s.publicJSON(s.cliStart))
+	mux.HandleFunc("POST /api/login/poll", s.publicJSON(s.cliPoll))
+	mux.HandleFunc("POST /api/login/logout", s.publicJSON(s.cliLogout))
+	mux.HandleFunc("GET /login/cli", s.cliPage)
+	mux.HandleFunc("POST /login/cli", s.authed(s.cliDecide))
 	// Files: buckets on the left, the open one on the right.
 	mux.HandleFunc("GET /files", s.authedGet(s.files))
 	mux.HandleFunc("GET /browse", func(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +212,8 @@ func (s *Server) Handler() http.Handler {
 	// Admin.
 	mux.HandleFunc("GET /admin", s.authedGet(s.admin(s.adminPage)))
 	mux.HandleFunc("POST /admin/revoke", s.authed(s.admin(s.adminRevoke)))
+	mux.HandleFunc("POST /admin/renew", s.authed(s.admin(s.adminRenew)))
+	mux.HandleFunc("POST /admin/lifetimes", s.authed(s.admin(s.adminSetLifetimes)))
 	mux.HandleFunc("POST /admin/revoke-user", s.authed(s.admin(s.adminRevokeUser)))
 	mux.HandleFunc("POST /admin/revoke-all", s.authed(s.admin(s.adminRevokeAll)))
 	mux.HandleFunc("POST /admin/check", s.authed(s.admin(s.adminCheck)))
@@ -305,6 +319,16 @@ type page struct {
 	ServerAPIToken  bool
 	NewAPIToken     string
 	NewAPITokenName string
+	// Lifetimes are a key form's choices of how long it lasts; KeyExpires is the key's expiry
+	// on its created and edit pages (nil never), and KeyNeverBy who made it never expire.
+	Lifetimes  []LifetimeChoice
+	KeyExpires *time.Time
+	KeyNeverBy string
+	// KeyPolicy is the admin page's key lifetimes; NeverCount how many keys never expire.
+	KeyPolicy  *KeyPolicy
+	NeverCount int
+	// CLILogin is the page approving an s3-portal login.
+	CLILogin *CLILoginView
 	// PortalURL is where the portal is reached, for the API's examples.
 	PortalURL string
 	// Brand is the header's title: TITLE, or none.
@@ -443,7 +467,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, id Identit
 	}
 	slog.Info("login", "user", id.Name, "via", source, "remote", s.clientIP(r))
 	if source == "ldap" {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, nextAfterLogin(w, r), http.StatusSeeOther)
 	}
 	return true
 }
@@ -981,6 +1005,8 @@ func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request, sess *Sess
 func (s *Server) keysPage(w http.ResponseWriter, r *http.Request, sess *Session) {
 	p := s.base(w, r, sess, "keys")
 	p.Keys = s.Portal.Keys(sess.User)
+	pol := s.Portal.KeyPolicy()
+	p.KeyPolicy, p.PortalURL = &pol, s.S3URL
 	p.KeyCaps = map[string]map[string]Caps{}
 	for _, k := range p.Keys {
 		p.KeyCaps[k.Access] = s.Portal.KeyAccess(r.Context(), k.Key)
@@ -1020,6 +1046,9 @@ func (s *Server) keyForm(w http.ResponseWriter, r *http.Request, sess *Session, 
 	p.Buckets = buckets
 	if p.Grants == nil {
 		p.Grants = map[string]Perm{}
+	}
+	if p.Lifetimes == nil {
+		p.Lifetimes = s.lifetimes(sess.User, "")
 	}
 	// Grants on buckets the person can no longer see still show, so
 	// saving doesn't quietly drop them.
@@ -1062,13 +1091,14 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, sess *Session
 		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
 		return
 	}
-	label := r.PostFormValue("label")
+	label, lifetime := r.PostFormValue("label"), r.PostFormValue("lifetime")
 	grants := grantsFromForm(r, buckets, nil)
-	access, secret, err := s.Portal.CreateKey(r.Context(), sess.User, label, grants)
+	access, secret, err := s.Portal.CreateKeyLasting(r.Context(), sess.User, label, grants, lifetime)
 	if err != nil {
 		var ue *UserError
 		if errors.As(err, &ue) {
-			s.keyForm(w, r, sess, "key_new.html", http.StatusBadRequest, page{Error: ue.Msg, KeyLabel: label, Grants: grants})
+			s.keyForm(w, r, sess, "key_new.html", http.StatusBadRequest, page{Error: ue.Msg, KeyLabel: label, Grants: grants,
+				Lifetimes: s.lifetimes(sess.User, lifetime)})
 			return
 		}
 		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
@@ -1076,8 +1106,24 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, sess *Session
 	}
 	s.render(w, http.StatusOK, "key_created.html", page{
 		User: &sess.User, CSRF: sess.CSRF, Tab: "keys",
-		KeyAccess: access, KeySecret: secret, KeyLabel: label, Grants: grants,
+		KeyAccess: access, KeySecret: secret, KeyLabel: label, Grants: grants, KeyExpires: s.keyExpiry(access),
 	})
+}
+
+// lifetimes are a key form's lifetimes, with lifetime chosen ("" the default).
+func (s *Server) lifetimes(u User, lifetime string) []LifetimeChoice {
+	pol := s.Portal.KeyPolicy()
+	d, never, err := parseLifetime(lifetime)
+	if lifetime == "" || err != nil {
+		d, never = pol.Default, false
+	}
+	return lifetimeChoices(pol, d, u.Admin, never)
+}
+
+// keyExpiry is a key's expiry, nil if it never expires (or is gone).
+func (s *Server) keyExpiry(access string) *time.Time {
+	k, _ := s.Portal.store.Get(access)
+	return keyExpires(k)
 }
 
 func (s *Server) editKey(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -1087,7 +1133,12 @@ func (s *Server) editKey(w http.ResponseWriter, r *http.Request, sess *Session) 
 		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
 		return
 	}
-	s.keyForm(w, r, sess, "key_edit.html", http.StatusOK, page{KeyAccess: access, KeyLabel: k.Label, Grants: k.Buckets})
+	if k.Login {
+		redirectFlash(w, r, "/keys", "", "Login keys aren't edited: revoke it, or run s3-portal login again.")
+		return
+	}
+	s.keyForm(w, r, sess, "key_edit.html", http.StatusOK, page{KeyAccess: access, KeyLabel: k.Label, Grants: k.Buckets,
+		KeyExpires: k.Expires, KeyNeverBy: k.NeverBy})
 }
 
 func (s *Server) updateKey(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -1103,16 +1154,26 @@ func (s *Server) updateKey(w http.ResponseWriter, r *http.Request, sess *Session
 		return
 	}
 	grants := grantsFromForm(r, buckets, k.Buckets)
-	if err := s.Portal.UpdateKey(r.Context(), sess.User, access, label, grants); err != nil {
+	lifetime := r.PostFormValue("lifetime")
+	err = s.Portal.UpdateKey(r.Context(), sess.User, access, label, grants)
+	if err == nil && r.PostFormValue("renew") == "yes" {
+		err = s.Portal.RenewKey(r.Context(), sess.User, access, lifetime)
+	}
+	if err != nil {
 		var ue *UserError
 		if errors.As(err, &ue) {
-			s.keyForm(w, r, sess, "key_edit.html", http.StatusBadRequest, page{Error: ue.Msg, KeyAccess: access, KeyLabel: label, Grants: grants})
+			s.keyForm(w, r, sess, "key_edit.html", http.StatusBadRequest, page{Error: ue.Msg, KeyAccess: access, KeyLabel: label, Grants: grants,
+				KeyExpires: s.keyExpiry(access), KeyNeverBy: k.NeverBy, Lifetimes: s.lifetimes(sess.User, lifetime)})
 			return
 		}
 		redirectFlash(w, r, "/keys", "", userMessage(r, sess, err))
 		return
 	}
-	redirectFlash(w, r, "/keys", "Updated key "+label+".", "")
+	msg := "Updated key " + label + "."
+	if r.PostFormValue("renew") == "yes" {
+		msg = "Updated key " + label + ": it " + expiryLabel(s.keyExpiry(access)) + "."
+	}
+	redirectFlash(w, r, "/keys", msg, "")
 }
 
 func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -1140,7 +1201,7 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 	p := s.base(w, r, sess, "admin")
 	p.Section = r.URL.Query().Get("section")
 	switch p.Section {
-	case "buckets", "keys", "trash", "revoke", "mirrors", "tokens":
+	case "buckets", "keys", "trash", "revoke", "mirrors", "tokens", "lifetimes":
 		if p.Section == "buckets" {
 			p.NewBucketOwner = r.URL.Query().Get("for")
 		}
@@ -1148,6 +1209,9 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request, sess *Session
 		p.Section = "people"
 	}
 	p.Filter = r.URL.Query().Get("owner")
+	if f := r.URL.Query().Get("filter"); f != "" {
+		p.Filter = f
+	}
 	if p.Section == "buckets" {
 		p.Sizes = s.Portal.BucketSizes(r.Context())
 	}
@@ -1190,6 +1254,44 @@ func (s *Server) adminCounts(r *http.Request, sess *Session, p *page) {
 	p.APITokens, _ = s.Portal.APITokenList(sess.User)
 	p.ServerAPIToken = s.APIToken != ""
 	p.PortalURL = s.S3URL
+	pol := s.Portal.KeyPolicy()
+	p.KeyPolicy, p.NeverCount, p.Lifetimes = &pol, s.Portal.NeverExpire(), s.lifetimes(sess.User, "")
+}
+
+// adminSetLifetimes sets how long keys last.
+func (s *Server) adminSetLifetimes(w http.ResponseWriter, r *http.Request, sess *Session) {
+	const back = "/admin?section=lifetimes"
+	var pol KeyPolicy
+	for _, f := range []struct {
+		name string
+		to   *time.Duration
+	}{{"default", &pol.Default}, {"login", &pol.Login}, {"max", &pol.Max}} {
+		d, never, err := parseLifetime(r.PostFormValue(f.name))
+		if err == nil && never {
+			err = userErr("Key lifetimes are lengths of time: an admin makes a key never expire on its own.")
+		}
+		if err != nil {
+			redirectFlash(w, r, back, "", userMessage(r, sess, err))
+			return
+		}
+		*f.to = d
+	}
+	if err := s.Portal.SetKeyPolicy(sess.User, pol); err != nil {
+		redirectFlash(w, r, back, "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, back, fmt.Sprintf("New keys now last %s (%s for login keys), at most %s.",
+		lifetimeLabel(pol.Default), lifetimeLabel(pol.Login), lifetimeLabel(pol.Max)), "")
+}
+
+// adminRenew renews any key, or makes it never expire.
+func (s *Server) adminRenew(w http.ResponseWriter, r *http.Request, sess *Session) {
+	access := r.PostFormValue("access")
+	if err := s.Portal.RenewKey(r.Context(), sess.User, access, r.PostFormValue("lifetime")); err != nil {
+		redirectFlash(w, r, "/admin?section=keys", "", userMessage(r, sess, err))
+		return
+	}
+	redirectFlash(w, r, "/admin?section=keys", "Renewed "+access+": it "+expiryLabel(s.keyExpiry(access))+".", "")
 }
 
 func (s *Server) adminRestoreTrash(w http.ResponseWriter, r *http.Request, sess *Session) {

@@ -130,6 +130,23 @@ they pick.
     *now*. When someone leaves a group, is disabled, or a grant is taken
     away, their keys shrink or stop in the same moment, and come back if
     the access does. The keys page marks a key that's limited this way.
+  - **Keys expire.** Each new key lasts a lifetime its maker picks, up to
+    the most an admin allows (admin page, Key lifetimes: by default 90
+    days for keys made on the Access keys page, 12 hours for login keys,
+    and 1 year at most). Past it, the key is revoked and deleted, within a
+    minute. Its owner renews it (Edit) before then, keeping its ID and
+    secret. Only admins make keys which never expire, or make a key so;
+    keys made before expiry existed, and imported keys, never expire, and
+    the admin's key list flags them. See `docs/design-expiring-keys.md`.
+  - **`s3-portal login`** (`cmd/s3-portal`, for Linux, Windows and macOS)
+    gets a login key from the command line: it shows a code, which its
+    user approves in the portal in their browser (`/login/cli`), signed in
+    as usual. The key reaches everything they can, following their access,
+    for the login lifetime, and the command sets up an aws profile (by
+    `credential_process`), an rclone remote and an mc alias named for the
+    portal. Several portals live side by side, by name; the default one is
+    the first logged in to, until `s3-portal default NAME`, or
+    `S3_PORTAL`. `logout` revokes the key.
   - Bucket policy, ACL and bucket configuration actions are never granted,
     so a key can't widen its own access.
 - **File browser:** each person also has a web account in the gateway,
@@ -213,6 +230,9 @@ they pick.
     refused, unless it's this key imported before, with the same owner and
     secret (`{"existing": true}`, unchanged). IDs are 3 to 128 letters,
     digits and `._@+=-`; secrets 8 to 128 printable characters.
+    `"lifetime": "12h" | "30d" | "2w" | "never"` sets how long a key lasts:
+    by default the Access keys page's default, or never for an imported
+    key. The answer has `expires`, absent for a key that never expires.
   - `DELETE /api/keys/<access key>` revokes it. A key already gone counts as
     revoked.
 

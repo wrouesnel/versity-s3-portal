@@ -8,6 +8,7 @@
         <li><a class="section" href="/admin?section=buckets"{{if or (eq .Section "buckets") (eq .Section "key-new")}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
         <li><a class="section" href="/admin?section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys <span class="count">{{len .AllKeys}}</span></a></li>
         <li><a class="section" href="/admin?section=mirrors"{{if or (eq .Section "mirrors") (eq .Section "mirror") (eq .Section "mirror-new") (eq .Section "server") (eq .Section "server-new")}} aria-current="page"{{end}}>Mirrors <span class="count">{{len .Mirrors}}</span></a></li>
+        <li><a class="section" href="/admin?section=lifetimes"{{if eq .Section "lifetimes"}} aria-current="page"{{end}}>Key lifetimes</a></li>
         <li><a class="section" href="/admin?section=tokens"{{if or (eq .Section "tokens") (eq .Section "token-created")}} aria-current="page"{{end}}>API tokens <span class="count">{{len .APITokens}}</span></a></li>
         {{if .ZFS}}<li><a class="section" href="/admin?section=trash"{{if eq .Section "trash"}} aria-current="page"{{end}}>Deleted buckets <span class="count">{{len .Trash}}</span></a></li>{{end}}
       </ul>
@@ -76,21 +77,27 @@
 
     {{else if eq .Section "keys"}}
     <div class="pane-head"><h1>Access keys</h1></div>
-    <p class="muted small">Every key anyone has made. Each reaches only the buckets it asked for, and never more than its owner can do now.</p>
+    <p class="muted small">Every key anyone has made. Each reaches only the buckets it asked for, and never more than its owner can do now, until it expires.{{if .NeverCount}} <a href="/admin?section=keys&amp;filter=never+expires">{{.NeverCount}} never expire</a>.{{end}}</p>
     {{if .AllKeys}}
     <input type="search" class="table-filter" data-table="#admin-keys" value="{{.Filter}}" placeholder="Filter {{len .AllKeys}} keys" aria-label="Filter keys">
     <div class="narrow-scroll"><table class="keys" id="admin-keys">
-      <thead><tr><th data-sort="text">Owner</th><th data-sort="text">Name</th><th data-sort="text">Access key ID</th><th>Buckets</th><th class="actions"></th></tr></thead>
+      <thead><tr><th data-sort="text">Owner</th><th data-sort="text">Name</th><th data-sort="text">Access key ID</th><th>Buckets</th><th data-sort="text">Expires</th><th class="actions"></th></tr></thead>
       <tbody>
       {{range .AllKeys}}
       <tr>
         <td>{{.Owner}}</td>
-        <td>{{.Label}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}{{if .IssuedBy}} by <span class="pill write" title="An admin issued this key for its owner">{{.IssuedBy}}</span>{{end}}</div></td>
+        <td>{{.Label}}{{if .Login}} <span class="pill">s3-portal login</span>{{end}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}{{if .IssuedBy}} by <span class="pill write" title="An admin issued this key for its owner">{{.IssuedBy}}</span>{{end}}</div></td>
         <td><code>{{.Access}}</code></td>
-        <td>{{template "perms" .Buckets}}</td>
+        <td>{{if and .Login (not .Buckets)}}<span class="muted">everything {{.Owner}} can reach</span>{{else}}{{template "perms" .Buckets}}{{end}}</td>
+        <td data-v="{{if .Expires}}{{.Expires.Format "2006-01-02T15:04"}}{{else}}9999{{end}}">{{if .Expires}}<span title="{{.Expires.Format "2 Jan 2006 15:04 MST"}}">{{expiry .Expires}}</span>{{else}}<span class="pill warn" title="{{if .NeverBy}}{{.NeverBy}} made it never expire{{else}}Made before keys expired{{end}}">never expires</span>{{end}}</td>
         <td class="actions"><details class="menu row-menu">
           <summary class="button ghost small actions-button">Actions</summary>
           <div class="pop menu-list">
+            {{if not .Login}}<form method="post" action="/admin/renew" class="menu-form">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="access" value="{{.Access}}">
+              <label class="small">Renew from now for <select name="lifetime">{{range $.Lifetimes}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+              <button class="menu-item">Renew</button>
+            </form>{{end}}
             <form method="post" action="/admin/revoke" data-confirm="Revoke {{.Owner}}'s key {{.Label}}? It stops working at once.">
               <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="access" value="{{.Access}}">
               <button class="menu-item danger">Revoke key…</button>
@@ -271,6 +278,24 @@
     {{end}}
     {{template "apiUsage" $}}
 
+    {{else if eq .Section "lifetimes"}}
+    {{with .KeyPolicy}}
+    <div class="pane-head"><h1>Key lifetimes</h1></div>
+    <p class="muted small">How long new keys last. A key past its expiry stops working, and is deleted, within a minute. People pick a lifetime up to the maximum, and renew keys before they expire; only admins make keys which never expire. Changing these doesn't change keys already made.</p>
+    <form method="post" action="/admin/lifetimes" class="mirror-form">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <label>Keys made on the Access keys page <input name="default" value="{{formatLifetime .Default}}" required pattern="[0-9]+[hdw]" class="lifetime-input"></label>
+      <p class="muted small">Preselected in the new key's form. Now {{lifetime .Default}}.</p>
+      <label>Login keys, made by <code>s3-portal login</code> <input name="login" value="{{formatLifetime .Login}}" required pattern="[0-9]+[hdw]" class="lifetime-input"></label>
+      <p class="muted small">Unless the command asks for another (<code>--lifetime</code>), up to the maximum. Now {{lifetime .Login}}.</p>
+      <label>The most anyone but an admin may ask for <input name="max" value="{{formatLifetime .Max}}" required pattern="[0-9]+[hdw]" class="lifetime-input"></label>
+      <p class="muted small">Now {{lifetime .Max}}. Neither default may be longer.</p>
+      <p class="muted small">Hours, days or weeks: <code>12h</code>, <code>90d</code>, <code>2w</code>.</p>
+      <p><button>Save</button></p>
+    </form>
+    {{if $.NeverCount}}<p class="muted small">{{$.NeverCount}} keys never expire: <a href="/admin?section=keys&amp;filter=never+expires">see them</a>.</p>{{end}}
+    {{end}}
+
     {{else if eq .Section "token-created"}}
     <div class="pane-head"><nav class="crumbs" aria-label="API tokens"><a href="/admin?section=tokens">API tokens</a><span class="sep">/</span><span aria-current="page">{{.NewAPITokenName}}</span></nav></div>
     <p class="flash warning">Copy the token now. It isn't shown again. If you lose it, revoke it and issue another.</p>
@@ -289,6 +314,9 @@
       <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="owner" value="{{.Owner}}">
       <p>A key of <strong>{{.Owner}}</strong>'s, to load data into their bucket: what it writes is theirs on disk, and it reaches no more than they can. It's on their Access keys page, marked as issued by you, where they (or you) can revoke it. Revoke it when the data is in.</p>
       <label>Name <input name="label" value="{{.Label}}" required maxlength="64"></label>
+      <label>Expires after
+        <select name="lifetime">{{range $.Lifetimes}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+      </label>
       <label>Bucket
         <select name="bucket" required>{{$b := .Bucket}}{{range .Buckets}}<option value="{{.}}"{{if eq . $b}} selected{{end}}>{{.}}</option>{{end}}</select>
       </label>

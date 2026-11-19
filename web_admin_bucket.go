@@ -81,7 +81,8 @@ func (s *Server) adminCreateKey(w http.ResponseWriter, r *http.Request, sess *Se
 	if f.Bucket == "" {
 		grants = nil
 	}
-	access, secret, err := s.Portal.CreateKeyFor(r.Context(), sess.User, f.Owner, f.Label, grants)
+	lifetime := r.PostFormValue("lifetime")
+	access, secret, err := s.Portal.CreateKeyForLasting(r.Context(), sess.User, f.Owner, f.Label, grants, lifetime)
 	if err != nil {
 		var ue *UserError
 		if errors.As(err, &ue) {
@@ -95,6 +96,7 @@ func (s *Server) adminCreateKey(w http.ResponseWriter, r *http.Request, sess *Se
 		// The card's own layout, not the admin pages' sidebar.
 		User: &sess.User, CSRF: sess.CSRF,
 		KeyAccess: access, KeySecret: secret, KeyLabel: strings.TrimSpace(f.Label), Grants: grants, IssuedFor: f.Owner,
+		KeyExpires: s.keyExpiry(access),
 	})
 }
 

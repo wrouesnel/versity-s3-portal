@@ -795,7 +795,7 @@ func cleanLabel(label string) (string, error) {
 // CreateKey issues a new access key for u and returns its secret, which
 // isn't shown again.
 func (p *Portal) CreateKey(ctx context.Context, u User, label string, grants map[string]Perm) (string, string, error) {
-	return p.createKey(ctx, u, label, grants, "", "", "")
+	return p.CreateKeyLasting(ctx, u, label, grants, "")
 }
 
 // CreateBucketFor makes a bucket owned by someone else, for admins: as
@@ -820,17 +820,7 @@ func (p *Portal) CreateBucketFor(ctx context.Context, admin User, owner, name st
 // theirs on disk. It reaches no more than they can, is recorded as issued by
 // the admin, and is on its owner's keys page, to revoke.
 func (p *Portal) CreateKeyFor(ctx context.Context, admin User, owner, label string, grants map[string]Perm) (string, string, error) {
-	if err := requireAdmin(admin); err != nil {
-		return "", "", err
-	}
-	person, err := p.knownPerson(owner)
-	if err != nil {
-		return "", "", err
-	}
-	if len(grants) == 0 {
-		return "", "", userErr("Pick the buckets the key is for.")
-	}
-	return p.createKey(ctx, person.User(owner), label, grants, admin.Name, "", "")
+	return p.CreateKeyForLasting(ctx, admin, owner, label, grants, "")
 }
 
 // importedKeyRe is what an imported key's ID may be: what S3 clients send
@@ -843,7 +833,9 @@ var importedKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+=-]{2,127}$`)
 // gateway has already is refused, unless it's this key, imported before: the same owner,
 // and the same secret, when it changes nothing and existing is true. The secret is given
 // only to the gateway, which keeps every key's.
-func (p *Portal) ImportKeyFor(ctx context.Context, admin User, owner, label string, grants map[string]Perm, access, secret string) (existing bool, err error) {
+//
+// lifetime is how long it lasts: "" never, as the server it came from didn't expire it.
+func (p *Portal) ImportKeyFor(ctx context.Context, admin User, owner, label string, grants map[string]Perm, access, secret, lifetime string) (existing bool, err error) {
 	if err := requireAdmin(admin); err != nil {
 		return false, err
 	}
@@ -868,7 +860,15 @@ func (p *Portal) ImportKeyFor(ctx context.Context, admin User, owner, label stri
 		}
 		return false, userErr("%s is already a key of the portal's, with another owner or secret: it isn't imported again.", access)
 	}
-	if _, _, err := p.createKey(ctx, person.User(owner), label, grants, admin.Name, access, secret); err != nil {
+	if lifetime == "" {
+		lifetime = "never"
+	}
+	expires, neverBy, err := p.expiry(admin, lifetime, 0)
+	if err != nil {
+		return false, err
+	}
+	o := keyOpts{IssuedBy: admin.Name, Access: access, Secret: secret, Expires: expires, NeverBy: neverBy}
+	if _, _, err := p.createKey(ctx, person.User(owner), label, grants, o); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -905,8 +905,19 @@ func (p *Portal) secretWorks(ctx context.Context, access, secret string) bool {
 	return true
 }
 
-// createKey issues a key: a new one, or with access and secret given, an imported one.
-func (p *Portal) createKey(ctx context.Context, u User, label string, grants map[string]Perm, issuedBy, access, secret string) (string, string, error) {
+// keyOpts are a key's particulars, beyond its owner, name and grants: who issued it, its ID
+// and secret if it's imported, its expiry, and whether it's a login key.
+type keyOpts struct {
+	IssuedBy, Access, Secret string
+	Expires                  *time.Time
+	NeverBy                  string
+	Login                    bool
+	Computer, LogoutHash     string
+}
+
+// createKey issues a key: a new one, or with o.Access and o.Secret, an imported one.
+func (p *Portal) createKey(ctx context.Context, u User, label string, grants map[string]Perm, o keyOpts) (string, string, error) {
+	issuedBy, access, secret := o.IssuedBy, o.Access, o.Secret
 	label, err := cleanLabel(label)
 	if err != nil {
 		return "", "", err
@@ -936,17 +947,20 @@ func (p *Portal) createKey(ctx context.Context, u User, label string, grants map
 	}); err != nil {
 		return "", "", err
 	}
-	if err := p.store.Put(access, &Key{Owner: u.Name, Label: label, Created: time.Now().UTC(), Buckets: grants, IssuedBy: issuedBy}); err != nil {
+	k := &Key{Owner: u.Name, Label: label, Created: time.Now().UTC(), Buckets: grants, IssuedBy: issuedBy,
+		Expires: o.Expires, NeverBy: o.NeverBy, Login: o.Login, Computer: o.Computer, LogoutHash: o.LogoutHash}
+	if err := p.store.Put(access, k); err != nil {
 		p.vgw.DeleteAccount(ctx, access)
 		return "", "", err
 	}
-	if err := p.syncBuckets(ctx, keys(grants)); err != nil {
+	if err := p.syncKeyBuckets(ctx, k); err != nil {
 		p.store.Delete(access)
-		p.syncBuckets(ctx, keys(grants))
+		p.syncKeyBuckets(ctx, k)
 		p.vgw.DeleteAccount(ctx, access)
 		return "", "", err
 	}
-	slog.Info("created key", "user", u.Name, "access", access, "label", label, "buckets", grants, "issuedBy", issuedBy)
+	slog.Info("created key", "user", u.Name, "access", access, "label", label, "buckets", grants, "issuedBy", issuedBy,
+		"expires", o.Expires, "neverBy", o.NeverBy, "login", o.Login)
 	return access, secret, nil
 }
 
@@ -961,6 +975,9 @@ func (p *Portal) UpdateKey(ctx context.Context, u User, access, label string, gr
 	if !ok || k.Owner != u.Name {
 		return userErr("No such key.")
 	}
+	if k.Login {
+		return userErr("Login keys aren't edited: revoke it, or run s3-portal login again.")
+	}
 	// Grants the key already has may stay even if they're more than its
 	// owner has now (they're limited when policies are written); new or
 	// raised ones must be covered.
@@ -974,7 +991,8 @@ func (p *Portal) UpdateKey(ctx context.Context, u User, access, label string, gr
 		return err
 	}
 	affected := append(keys(k.Buckets), keys(grants)...)
-	updated := &Key{Owner: k.Owner, Label: label, Created: k.Created, Buckets: grants}
+	updated := copyKey(k)
+	updated.Label, updated.Buckets = label, grants
 	if err := p.store.Put(access, updated); err != nil {
 		return err
 	}
@@ -1009,6 +1027,9 @@ func (p *Portal) revoke(ctx context.Context, accesses []string) error {
 			continue
 		}
 		affected = append(affected, keys(k.Buckets)...)
+		if k.Login && len(k.Buckets) == 0 {
+			affected = append(affected, p.allBucketNames(ctx)...)
+		}
 		if err := p.store.Delete(access); err != nil {
 			return err
 		}
@@ -1127,6 +1148,12 @@ func (p *Portal) policyGrants(bucket, owner string, people map[string]*Person) m
 	for acct, g := range p.store.Grants(bucket) {
 		c, _ := access(g.Owner, people[g.Owner], owner, meta)
 		if c = g.Perm.Caps().Intersect(c); c.Any() {
+			grants[acct] = c
+		}
+	}
+	// Login keys which asked for no buckets reach what their owner can, as the web account.
+	for acct, name := range p.store.LoginKeys() {
+		if c, _ := access(name, people[name], owner, meta); c.Any() {
 			grants[acct] = c
 		}
 	}

@@ -4,18 +4,19 @@
     <h1>Access keys</h1>
     <a class="button" href="/keys/new">New key</a>
   </div>
-  <p class="muted">Keys let apps and tools reach buckets over S3. Each key reaches only the buckets you give it, at most at your own level. Make one per app or device, so you can revoke it on its own.</p>
+  <p class="muted">Keys let apps and tools reach buckets over S3. Each key reaches only the buckets you give it, at most at your own level, until it expires. Make one per app or device, so you can revoke it on its own. On your own computer, <code>s3-portal login</code> makes one for you, and sets up aws, rclone and mc (see below).</p>
   {{if .Keys}}
   <input type="search" class="table-filter" data-table="#my-keys" placeholder="Filter {{len .Keys}} keys by name, ID or bucket" aria-label="Filter keys">
   <table class="keys" id="my-keys">
-    <thead><tr><th data-sort="text">Name</th><th data-sort="text">Access key ID</th><th>Buckets</th><th class="actions"></th></tr></thead>
+    <thead><tr><th data-sort="text">Name</th><th data-sort="text">Access key ID</th><th>Buckets</th><th data-sort="text">Expires</th><th class="actions"></th></tr></thead>
     <tbody>
     {{range .Keys}}{{$now := index $.KeyCaps .Access}}
     <tr>
-      <td><strong>{{.Label}}</strong><div class="muted small">created {{.Created.Format "2 Jan 2006"}}{{if .IssuedBy}} by <span class="pill write" title="An admin issued this key for you, to load data into your buckets. Revoke it if it's no longer needed.">{{.IssuedBy}}, an admin</span>{{end}}</div></td>
+      <td><strong>{{.Label}}</strong>{{if .Login}} <span class="pill" title="Made by s3-portal login{{if .Computer}} on {{.Computer}}{{end}}">s3-portal login</span>{{end}}<div class="muted small">created {{.Created.Format "2 Jan 2006"}}{{if .IssuedBy}} by <span class="pill write" title="An admin issued this key for you, to load data into your buckets. Revoke it if it's no longer needed.">{{.IssuedBy}}, an admin</span>{{end}}</div></td>
       <td><code class="copy">{{.Access}}</code></td>
       <td>
-        {{if .Buckets}}
+        {{if and .Login (not .Buckets)}}<span class="muted">everything you can reach, as you can</span>
+        {{else if .Buckets}}
         {{$n := len .Buckets}}
         {{if gt $n 4}}<details class="more-buckets"><summary>{{$n}} buckets</summary>{{end}}
         <ul class="perms">
@@ -27,10 +28,11 @@
         {{if gt $n 4}}</details>{{end}}
         {{else}}<span class="muted">no buckets</span>{{end}}
       </td>
+      <td data-v="{{if .Expires}}{{.Expires.Format "2006-01-02T15:04"}}{{else}}9999{{end}}">{{if .Expires}}<span{{if soon .Key}} class="pill warn"{{end}} title="{{.Expires.Format "2 Jan 2006 15:04 MST"}}">{{expiry .Expires}}</span>{{else}}<span class="muted" title="{{if .NeverBy}}{{.NeverBy}}, an admin, made it never expire{{else}}Made before keys expired{{end}}">never expires</span>{{end}}</td>
       <td class="actions"><details class="menu row-menu">
         <summary class="button ghost small actions-button" aria-label="Actions for {{.Label}}">Actions</summary>
         <div class="pop menu-list">
-          <a class="menu-item" href="/keys/edit?access={{.Access}}">Edit name and buckets</a>
+          {{if not .Login}}<a class="menu-item" href="/keys/edit?access={{.Access}}">Edit, or renew</a>{{end}}
           <form method="post" action="/keys/delete" data-confirm="Revoke the key {{.Label}}? Anything using it stops working.">
             <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="access" value="{{.Access}}">
             <button class="menu-item danger">Revoke key…</button>
@@ -53,5 +55,8 @@
     <dt>Region</dt><dd><code class="copy">{{.Region}}</code></dd>
     <dt>Addressing</dt><dd>Path style</dd>
   </dl>
+  <h3>From your computer: <code>s3-portal login</code></h3>
+  <p class="muted small">It opens this portal to approve, then makes a key for that computer which reaches everything you can, for {{if .KeyPolicy}}{{lifetime .KeyPolicy.Login}}{{else}}a few hours{{end}}, and sets up the <code>aws</code> profile, rclone remote and mc alias it names for the portal. Run it again when the key expires.</p>
+  <p><code class="copy">s3-portal login {{.PortalURL}}</code></p>
 </section>
 {{template "footer" .}}

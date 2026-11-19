@@ -338,5 +338,5 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	// The session cookie is SameSite=Strict, and browsers don't send it on a
 	// redirect that started on the provider's site, so step through a page
 	// of our own first.
-	s.render(w, http.StatusOK, "continue.html", page{Refresh: "/"})
+	s.render(w, http.StatusOK, "continue.html", page{Refresh: nextAfterLogin(w, r)})
 }

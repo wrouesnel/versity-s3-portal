@@ -1,0 +1,41 @@
+{{template "header" .}}
+{{with .CLILogin}}
+<section class="card cli-login">
+  {{if eq .State "enter"}}
+  <h1>Sign in s3-portal</h1>
+  <p class="muted"><code>s3-portal login</code> shows a code in your terminal. Type it here to approve that computer.</p>
+  <form method="get" action="/login/cli">
+    <label>Code <input name="code" value="{{.Code}}" required autofocus autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH" pattern="[A-Za-z0-9-]{8,9}" class="code-input"></label>
+    <p class="row"><button>Continue</button></p>
+  </form>
+
+  {{else if eq .State "confirm"}}
+  <h1>Sign in s3-portal on {{.Computer}}?</h1>
+  <p>Someone ran <code>s3-portal login</code> on <strong>{{.Computer}}</strong> ({{.From}}), {{since .Asked}} ago, and asks for a key of yours. Approve it only if that was you.</p>
+  <dl>
+    <dt>Code</dt><dd><code class="code-big">{{.Code}}</code></dd>
+    <dt>The key</dt><dd>{{if .Buckets}}reaches only {{template "perms" .Buckets}}{{else}}reaches everything you can, as you can, while it lasts{{if .Reach}}: now {{template "perms" .Reach}}{{end}}{{end}}</dd>
+    <dt>For</dt><dd>{{lifetime .Lifetime}}, then it expires</dd>
+  </dl>
+  <form method="post" action="/login/cli">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="code" value="{{.Code}}">
+    <label class="check"><input type="checkbox" name="matches" value="yes" required> My terminal shows this code, <strong>{{.Code}}</strong></label>
+    <p class="row"><button name="decision" value="approve">Approve</button> <button class="ghost" name="decision" value="deny" formnovalidate>Deny</button></p>
+  </form>
+
+  {{else if eq .State "approved"}}
+  <h1>Signed in on {{.Computer}}</h1>
+  <p>Go back to your terminal: s3-portal has its key, for {{lifetime .Lifetime}}. It's on your <a href="/keys">Access keys</a> page, to revoke.</p>
+
+  {{else if eq .State "denied"}}
+  <h1>Not signed in</h1>
+  <p>You denied <code>s3-portal login</code> on {{.Computer}}: it gets no key. If you didn't run it, someone may be trying to get one of your keys; tell an admin.</p>
+
+  {{else}}
+  <h1>That code has expired</h1>
+  <p>Codes last 10 minutes, and give one key. Run <code>s3-portal login</code> again for a new one.</p>
+  <p class="row"><a class="button ghost" href="/login/cli">Enter another code</a></p>
+  {{end}}
+</section>
+{{end}}
+{{template "footer" .}}

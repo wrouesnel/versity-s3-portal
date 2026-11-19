@@ -9,6 +9,7 @@
   <dl>
     <dt>Access key ID</dt><dd><code class="copy">{{.KeyAccess}}</code></dd>
     <dt>Secret access key</dt><dd><code class="copy">{{.KeySecret}}</code></dd>
+    <dt>Expires</dt><dd>{{if .KeyExpires}}{{.KeyExpires.Format "2 Jan 2006 at 15:04 MST"}} ({{expiry .KeyExpires}}): renew it before then on the Access keys page{{else}}never{{end}}</dd>
     <dt>Endpoint</dt><dd><code class="copy">{{.S3URL}}</code></dd>
     <dt>Region</dt><dd><code>{{.Region}}</code></dd>
     <dt>Addressing</dt><dd>Path style</dd>

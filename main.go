@@ -228,6 +228,8 @@ func run() error {
 	}
 	// Mirror passes that are due; admins' actions start others at once.
 	go portal.RunMirrors(ctx, time.Minute)
+	// Expired keys stop working within a minute.
+	go portal.RunReaper(ctx, time.Minute)
 
 	sessions := &Sessions{Key: []byte(sessionKey), TTL: 12 * time.Hour, Secure: env("INSECURE_COOKIES", "") == "", Store: store}
 	server := NewServer(portal, auth, oidcAuth, sessions, os.Getenv("TITLE"), publicURL, vgw.Region)
