@@ -158,7 +158,9 @@ func (p *Portal) accessChanged(old, new *Person) bool {
 
 // PersonStatus is what a check of someone found.
 type PersonStatus struct {
-	User     string    `json:"user"`
+	User string `json:"user"`
+	// Owns is how many buckets they own, for the admin page (a disabled owner's, to transfer).
+	Owns     int       `json:"owns,omitempty"`
 	Known    bool      `json:"known"`
 	Source   string    `json:"source,omitempty"`
 	Disabled bool      `json:"disabled"`
@@ -404,10 +406,18 @@ type BucketView struct {
 	Via []string
 	// Manage is whether they may change its grants or delete it.
 	Manage bool
+	// Manager is whether they manage it through a group (ManagedBy), not owning it.
+	Manager   bool
+	ManagedBy []string
 }
 
 // Level names the access, for display.
-func (b BucketView) Level() string { return capsLabel(b.Caps) }
+func (b BucketView) Level() string {
+	if b.Manager {
+		return PermManage.Label()
+	}
+	return capsLabel(b.Caps)
+}
 
 func capsLabel(c Caps) string {
 	for _, p := range Perms {
@@ -458,6 +468,35 @@ func access(name string, person *Person, ownerAcct string, meta *BucketMeta) (Ca
 	return c, via
 }
 
+// bucketView is how u (person) sees a bucket owned by ownerAcct: their access, and whether
+// they manage it (owning it, an admin, or in a group which manages it).
+func bucketView(u User, person *Person, name, ownerAcct string, meta *BucketMeta) BucketView {
+	c, via := access(u.Name, person, ownerAcct, meta)
+	owner := ownerName(ownerAcct)
+	v := BucketView{Name: name, Owner: owner, Caps: c, Via: via, ManagedBy: managers(meta)}
+	if owner != u.Name && person != nil && !person.Disabled {
+		for _, g := range v.ManagedBy {
+			if person.InGroup(g) {
+				v.Manager = true
+			}
+		}
+	}
+	v.Manage = (owner == u.Name && c.Any()) || u.Admin || v.Manager
+	return v
+}
+
+// managers are the groups which manage a bucket, sorted.
+func managers(meta *BucketMeta) []string {
+	var out []string
+	for g, perm := range meta.Groups {
+		if perm == PermManage {
+			out = append(out, g)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func ownerName(acct string) string {
 	name, _ := strings.CutPrefix(acct, ownerPrefix)
 	if name == acct {
@@ -475,12 +514,11 @@ func (p *Portal) Buckets(ctx context.Context, u User) ([]BucketView, error) {
 	person, _ := p.store.Person(u.Name)
 	var out []BucketView
 	for _, b := range all {
-		c, via := access(u.Name, person, b.Owner, p.store.BucketMeta(b.Name))
-		if c.None() {
+		v := bucketView(u, person, b.Name, b.Owner, p.store.BucketMeta(b.Name))
+		if v.Caps.None() {
 			continue
 		}
-		owner := ownerName(b.Owner)
-		out = append(out, BucketView{Name: b.Name, Owner: owner, Caps: c, Via: via, Manage: owner == u.Name || u.Admin})
+		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		oi, oj := out[i].Owner == u.Name, out[j].Owner == u.Name
@@ -511,10 +549,8 @@ func (p *Portal) Bucket(ctx context.Context, u User, bucket string, fresh bool) 
 			continue
 		}
 		person, _ := p.store.Person(u.Name)
-		c, via := access(u.Name, person, b.Owner, p.store.BucketMeta(b.Name))
-		owner := ownerName(b.Owner)
-		v := BucketView{Name: b.Name, Owner: owner, Caps: c, Via: via, Manage: (owner == u.Name && c.Any()) || u.Admin}
-		if c.None() && !v.Manage {
+		v := bucketView(u, person, b.Name, b.Owner, p.store.BucketMeta(b.Name))
+		if v.Caps.None() && !v.Manage {
 			break
 		}
 		return v, nil
@@ -624,7 +660,7 @@ func (p *Portal) DeleteBucket(ctx context.Context, u User, name string) error {
 		return err
 	}
 	if !v.Manage {
-		return userErr("Only the bucket's owner or an admin can delete it.")
+		return userErr("Only the bucket's owner, a group managing it, or an admin can delete it.")
 	}
 	if m, ok := p.store.Mirror(name); ok && m.Active() {
 		return userErr("Bucket %q is being mirrored in. An admin can abandon the mirror first.", name)
@@ -680,7 +716,7 @@ func (p *Portal) SetGroupGrant(ctx context.Context, u User, bucket, group string
 		return err
 	}
 	if !v.Manage {
-		return userErr("Only the bucket's owner or an admin can change who has access.")
+		return userErr("Only the bucket's owner, a group managing it, or an admin can change who has access.")
 	}
 	meta := p.store.BucketMeta(bucket)
 	// Group names compare without case; keep one spelling.
@@ -773,8 +809,8 @@ func (p *Portal) KeyAccess(ctx context.Context, k *Key) map[string]Caps {
 // reach.
 func (p *Portal) checkGrants(ctx context.Context, u User, grants map[string]Perm) error {
 	for b, perm := range grants {
-		if !perm.Valid() {
-			return userErr("Pick a level of access for %s.", b)
+		if !perm.Valid() || perm == PermManage {
+			return userErr("Pick a level of access for %s: a key reads and writes; only groups manage buckets.", b)
 		}
 		v, err := p.Bucket(ctx, u, b, true)
 		if err != nil || !v.Caps.Covers(perm.Caps()) {

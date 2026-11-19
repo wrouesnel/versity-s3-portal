@@ -154,7 +154,7 @@ func (p *Portal) manageZFS(ctx context.Context, u User, bucket string, adminOnly
 		return userErr("Only admins can change that.")
 	}
 	if !v.Manage {
-		return userErr("Only the bucket's owner or an admin can change that.")
+		return userErr("Only the bucket's owner, a group managing it, or an admin can change that.")
 	}
 	return nil
 }

@@ -125,6 +125,7 @@ td.when { white-space: nowrap; font-size: .85rem; font-variant-numeric: tabular-
 ul.perms { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .pill { display: inline-block; font-size: .75rem; font-weight: 500; padding: 0 5px; border-radius: 3px; background: var(--code-bg); color: var(--muted); white-space: nowrap; }
 .pill.readwrite { background: var(--accent-soft); color: var(--accent); }
+.pill.manage { background: var(--accent); color: #fff; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; margin: 0 0 10px; align-items: center; }
 dt { color: var(--muted); }
 dd { margin: 0; }

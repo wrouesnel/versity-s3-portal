@@ -5,7 +5,7 @@
       <h2>Admin</h2>
       <ul>
         <li><a class="section" href="/admin?section=people"{{if eq .Section "people"}} aria-current="page"{{end}}>People <span class="count">{{len .People}}</span></a></li>
-        <li><a class="section" href="/admin?section=buckets"{{if or (eq .Section "buckets") (eq .Section "key-new")}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
+        <li><a class="section" href="/admin?section=buckets"{{if or (eq .Section "buckets") (eq .Section "key-new") (eq .Section "bucket-transfer")}} aria-current="page"{{end}}>Buckets <span class="count">{{len .AllBuckets}}</span></a></li>
         <li><a class="section" href="/admin?section=keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Access keys <span class="count">{{len .AllKeys}}</span></a></li>
         <li><a class="section" href="/admin?section=mirrors"{{if or (eq .Section "mirrors") (eq .Section "mirror") (eq .Section "mirror-new") (eq .Section "server") (eq .Section "server-new")}} aria-current="page"{{end}}>Mirrors <span class="count">{{len .Mirrors}}</span></a></li>
         <li><a class="section" href="/admin?section=lifetimes"{{if eq .Section "lifetimes"}} aria-current="page"{{end}}>Key lifetimes</a></li>
@@ -47,7 +47,7 @@
       </details>
     </div>
     {{if .AllBuckets}}
-    <input type="search" class="table-filter" data-table="#admin-buckets" placeholder="Filter {{len .AllBuckets}} buckets" aria-label="Filter buckets">
+    <input type="search" class="table-filter" data-table="#admin-buckets" value="{{.Filter}}" placeholder="Filter {{len .AllBuckets}} buckets" aria-label="Filter buckets">
     <div class="narrow-scroll"><table class="files" id="admin-buckets">
       <thead><tr><th data-sort="text" aria-sort="ascending">Bucket</th>{{if .Sizes}}<th class="num" data-sort="num">Size</th><th class="num" data-sort="num">Quota</th>{{end}}<th data-sort="text">Owner</th><th data-sort="text">Groups</th><th class="actions"></th></tr></thead>
       <tbody>
@@ -63,6 +63,7 @@
             <a class="menu-item" href="/buckets/settings?bucket={{.Name}}">Group access</a>
             <a class="menu-item" href="/buckets/settings?bucket={{.Name}}&amp;section=keys">Access keys</a>
             {{if .Owner}}<a class="menu-item" href="/admin/keys/new?bucket={{.Name}}">Issue a key to load data…</a>{{end}}
+            <a class="menu-item" href="/admin/buckets/transfer?bucket={{.Name}}">Transfer to another owner…</a>
             {{if $.ZFS}}<a class="menu-item" href="/buckets/settings?bucket={{.Name}}&amp;section=storage">Storage and backups</a>{{end}}
             <a class="menu-item" href="/files?bucket={{.Name}}">Browse files</a>
           </div>
@@ -307,6 +308,29 @@
     {{template "apiUsage" $}}
     <p><a class="button" href="/admin?section=tokens">Done</a></p>
 
+    {{else if eq .Section "bucket-transfer"}}
+    {{with .Transfer}}
+    <div class="pane-head"><nav class="crumbs" aria-label="Buckets"><a href="/admin?section=buckets">Buckets</a><span class="sep">/</span><span aria-current="page">Transfer {{.Bucket}}</span></nav></div>
+    <form method="post" action="/admin/buckets/transfer" class="mirror-form" autocomplete="off">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="bucket" value="{{.Bucket}}">
+      <p><strong>{{.Bucket}}</strong> is {{if .Owner}}<strong>{{.Owner}}</strong>'s{{if .OwnerDisabled}} (suspended){{end}}{{else}}nobody's{{end}}{{if .ManagedBy}}, and managed by {{join .ManagedBy ", "}}{{end}}.</p>
+      <label>New owner
+        <select name="owner" required>
+          <option value="">Pick someone…</option>
+          {{$o := .Owner}}{{range $.People}}{{if and (not .Disabled) (ne .User $o)}}<option value="{{.User}}">{{.User}}</option>{{end}}{{end}}
+        </select>
+      </label>
+      <h3>What changes</h3>
+      <ul class="small">
+        <li>The new owner has read &amp; write, manages it, and it's listed as theirs.</li>
+        <li>{{if .Owner}}{{.Owner}} keeps only what their groups give them{{if .OldOwnerVia}} ({{.OldOwnerVia}}){{else}}: none of their groups have access, so they lose it{{end}}.{{if .OldOwnerKeys}} {{if eq .OldOwnerKeys 1}}Their key reaching it {{if .OldOwnerVia}}is limited the same way{{else}}stops reaching it{{end}}{{else}}Their {{.OldOwnerKeys}} keys reaching it {{if .OldOwnerVia}}are limited the same way{{else}}stop reaching it{{end}}{{end}}, at once.{{end}}{{else}}Nobody owns it now.{{end}}</li>
+        <li>Groups' access, managing groups, keys, quota, snapshots and backups stay as they are.</li>
+        <li>Files already there keep their owners on disk (whoever uploaded each); new ones are their uploaders', as always.</li>
+      </ul>
+      <p><button>Transfer {{.Bucket}}</button> <a class="button ghost" href="/admin?section=buckets">Cancel</a></p>
+    </form>
+    {{end}}
+
     {{else if eq .Section "key-new"}}
     {{with .AdminKey}}
     <div class="pane-head"><nav class="crumbs" aria-label="Buckets"><a href="/admin?section=buckets">Buckets</a><span class="sep">/</span><a href="/admin/keys/new?bucket={{.Bucket}}" aria-current="page">Issue {{.Owner}} a key</a></nav></div>
@@ -433,7 +457,7 @@
             </div>
           </details>
         </div></td>
-        <td>{{if .Disabled}}<span class="pill warn">suspended</span><div class="muted small">{{.Reason}}</div>{{else}}<span class="pill ok">active</span>{{end}}</td>
+        <td>{{if .Disabled}}<span class="pill warn">suspended</span><div class="muted small">{{.Reason}}</div>{{if .Owns}}<div class="small"><a href="/admin?section=buckets&amp;owner={{.User}}" title="Nobody but an admin, or a group managing them, can manage their buckets now">owns {{.Owns}} bucket{{if ne .Owns 1}}s{{end}}: transfer them</a></div>{{end}}{{else}}<span class="pill ok">active</span>{{end}}</td>
         <td class="small">{{join .Groups ", "}}</td>
         <td class="num">{{.Keys}}</td>
         <td class="when muted">{{.Checked.Local.Format "2 Jan 15:04"}}</td>

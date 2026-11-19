@@ -60,7 +60,7 @@
         <td><a class="bucket" href="{{browseURL .Name ""}}">{{.Name}}</a></td>
         {{if $.Sizes}}{{with size $.Sizes .Name}}<td class="num" data-v="{{.Referenced}}"{{if .RefQuota}} title="{{pct .Referenced .RefQuota}}% of its {{humanSize .RefQuota}} quota"{{end}}>{{if .Bucket}}{{humanSize .Referenced}}{{else}}<span class="muted">—</span>{{end}}</td>{{end}}{{end}}
         <td>{{if eq .Owner $me}}you{{else if .Owner}}{{.Owner}}{{else}}<span class="muted">nobody</span>{{end}}</td>
-        <td>{{template "level" .Caps}}</td>
+        <td>{{if .Manager}}<span class="pill manage" title="Read &amp; write, and you manage it, through {{join .ManagedBy ", "}}">manages</span>{{else}}{{template "level" .Caps}}{{end}}</td>
         <td class="muted">{{join .Via ", "}}</td>
       </tr>
       {{end}}
@@ -186,7 +186,8 @@
 
     {{else}}
     <h2>Group access</h2>
-    <p class="muted">Owned by <strong>{{if .Open.Owner}}{{.Open.Owner}}{{else}}nobody{{end}}</strong>. The owner always has read &amp; write. Groups below give their members access: they see the bucket under “Shared with you”, can use the file browser, and can make keys up to their level.</p>
+    <p class="muted">Owned by <strong>{{if .Open.Owner}}{{.Open.Owner}}{{else}}nobody{{end}}</strong>{{if .Open.ManagedBy}}, and managed by {{join .Open.ManagedBy ", "}}{{end}}. The owner always has read &amp; write. Groups below give their members access: they see the bucket under “Shared with you”, can use the file browser, and can make keys up to their level.</p>
+    <p class="muted small"><span class="pill manage">manages</span> is read &amp; write, and managing the bucket as its owner does: who has access, its keys, storage and backups, and deleting it. Give it to a team, so the bucket isn't stuck if its owner leaves. Only an admin can transfer the bucket to another owner.</p>
 
     {{if .Grantees}}
     <table class="grantees">
@@ -194,14 +195,14 @@
       <tbody>
       {{range $g, $p := .Grantees}}
       <tr>
-        <td><strong>{{$g}}</strong></td>
+        <td><strong>{{$g}}</strong>{{if eq $p "manage"}} <span class="pill manage">manages</span>{{end}}</td>
         <td>
           <form method="post" action="/buckets/groups" class="row compact autosubmit">
             <input type="hidden" name="csrf" value="{{$.CSRF}}">
             <input type="hidden" name="bucket" value="{{$.Open.Name}}">
             <input type="hidden" name="group" value="{{$g}}">
             <select name="perm" aria-label="Level for {{$g}}">
-              {{range perms}}<option value="{{.}}"{{if eq . $p}} selected{{end}}>{{.Label}}</option>{{end}}
+              {{range groupPerms}}<option value="{{.}}"{{if eq . $p}} selected{{end}}>{{.Label}}</option>{{end}}
             </select>
             <button class="ghost small">Save</button>
           </form>
@@ -228,11 +229,12 @@
       <input name="group" list="group-list" placeholder="group name" aria-label="Group" autocomplete="off" required>
       <datalist id="group-list">{{range .GroupList}}<option value="{{.}}">{{end}}</datalist>
       <select name="perm" aria-label="Level">
-        {{range perms}}<option value="{{.}}"{{if eq . "read"}} selected{{end}}>{{.Label}}</option>{{end}}
+        {{range groupPerms}}<option value="{{.}}"{{if eq . "read"}} selected{{end}}>{{.Label}}</option>{{end}}
       </select>
       <button>Give access</button>
     </form>
     <dl class="levels">
+      <dt>Manages</dt><dd>Read &amp; write, and managing the bucket as its owner does. For groups only.</dd>
       <dt>Read &amp; write</dt><dd>List, download, upload, overwrite and delete.</dd>
       <dt>Add only</dt><dd>List and download, and add new files, but never overwrite or delete anything.</dd>
       <dt>Read only</dt><dd>List and download.</dd>

@@ -20,7 +20,13 @@ const (
 	// delete anything. The gateway enforces it by allowing uploads only
 	// with If-None-Match: *, which fails if the object exists.
 	PermCreateOnly Perm = "createonly"
+	// PermManage is a group's alone: read & write, and managing the bucket as its owner
+	// does (who has access, its keys, storage and backups, deleting it). Keys never have it.
+	PermManage Perm = "manage"
 )
+
+// GroupPerms are the levels a group may be given, most to least, for forms.
+var GroupPerms = append([]Perm{PermManage}, Perms...)
 
 // Perms lists the levels, most to least access, for forms.
 var Perms = []Perm{PermReadWrite, PermCreateOnly, PermRead, PermWriteOnly}
@@ -37,6 +43,8 @@ func (p Perm) Label() string {
 		return "write only"
 	case PermCreateOnly:
 		return "add only"
+	case PermManage:
+		return "manages"
 	}
 	return string(p)
 }
@@ -54,6 +62,7 @@ var permCaps = map[Perm]Caps{
 	PermReadWrite:  {Read: true, Put: true, Delete: true},
 	PermWriteOnly:  {Put: true},
 	PermCreateOnly: {Read: true, Create: true},
+	PermManage:     {Read: true, Put: true, Delete: true},
 }
 
 func (p Perm) Caps() Caps { return permCaps[p] }

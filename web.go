@@ -61,10 +61,11 @@ type Server struct {
 func NewServer(portal *Portal, auth Authenticator, oidcAuth *OIDCAuth, sessions *Sessions, title, s3URL, region string) *Server {
 	assetPrefix := "/static/" + staticHash() + "/"
 	tmpl := template.Must(template.New("").Funcs(template.FuncMap{
-		"asset":     func(name string) string { return assetPrefix + name },
-		"permLabel": func(p Perm) string { return p.Label() },
-		"capsLabel": capsLabel,
-		"perms":     func() []Perm { return Perms },
+		"asset":      func(name string) string { return assetPrefix + name },
+		"permLabel":  func(p Perm) string { return p.Label() },
+		"capsLabel":  capsLabel,
+		"perms":      func() []Perm { return Perms },
+		"groupPerms": func() []Perm { return GroupPerms },
 		// covers says whether access c allows level p.
 		"covers":         func(c Caps, p Perm) bool { return c.Covers(p.Caps()) },
 		"humanSize":      humanSize,
@@ -213,6 +214,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin", s.authedGet(s.admin(s.adminPage)))
 	mux.HandleFunc("POST /admin/revoke", s.authed(s.admin(s.adminRevoke)))
 	mux.HandleFunc("POST /admin/renew", s.authed(s.admin(s.adminRenew)))
+	mux.HandleFunc("GET /admin/buckets/transfer", s.authedGet(s.admin(s.adminTransferForm)))
+	mux.HandleFunc("POST /admin/buckets/transfer", s.authed(s.admin(s.adminTransfer)))
 	mux.HandleFunc("POST /admin/lifetimes", s.authed(s.admin(s.adminSetLifetimes)))
 	mux.HandleFunc("POST /admin/revoke-user", s.authed(s.admin(s.adminRevokeUser)))
 	mux.HandleFunc("POST /admin/revoke-all", s.authed(s.admin(s.adminRevokeAll)))
@@ -327,6 +330,8 @@ type page struct {
 	// KeyPolicy is the admin page's key lifetimes; NeverCount how many keys never expire.
 	KeyPolicy  *KeyPolicy
 	NeverCount int
+	// Transfer is the admin's form transferring a bucket to another owner.
+	Transfer *TransferForm
 	// CLILogin is the page approving an s3-portal login.
 	CLILogin *CLILoginView
 	// PortalURL is where the portal is reached, for the API's examples.
@@ -600,7 +605,7 @@ func (s *Server) bucketSettings(w http.ResponseWriter, r *http.Request, sess *Se
 		return
 	}
 	if !p.Open.Manage {
-		redirectFlash(w, r, browseURL(bucket, ""), "", "Only the bucket's owner or an admin can change its settings.")
+		redirectFlash(w, r, browseURL(bucket, ""), "", "Only the bucket's owner, a group managing it, or an admin can change its settings.")
 		return
 	}
 	p.Settings = true
@@ -1235,8 +1240,11 @@ func (s *Server) adminCounts(r *http.Request, sess *Session, p *page) {
 			p.Owners = append(p.Owners, e.Owner)
 		}
 	}
+	owns := s.Portal.OwnedBuckets(r.Context())
 	for _, name := range sortedKeys(s.Portal.store.People()) {
-		p.People = append(p.People, s.Portal.Status(name))
+		st := s.Portal.Status(name)
+		st.Owns = owns[name]
+		p.People = append(p.People, st)
 	}
 	p.Directory = s.Portal.dir != nil
 	buckets, err := s.Portal.AllBuckets(r.Context())

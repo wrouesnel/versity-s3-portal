@@ -30,6 +30,7 @@ func (s *Server) adminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/users/{name}/directory", s.api(s.apiDirectoryCheck))
 	mux.HandleFunc("POST /api/users/{name}/register", s.api(s.apiRegisterUser))
 	mux.HandleFunc("POST /api/buckets", s.api(s.apiEnsureBucket))
+	mux.HandleFunc("POST /api/buckets/{bucket}/owner", s.api(s.apiTransferBucket))
 	mux.HandleFunc("POST /api/keys", s.api(s.apiIssueKey))
 	mux.HandleFunc("DELETE /api/keys/{access}", s.api(s.apiRevokeKey))
 }

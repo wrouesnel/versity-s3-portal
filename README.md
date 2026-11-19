@@ -103,7 +103,8 @@ they pick.
   gateway, `owner.<user>`, whose secret is random and thrown away, so nobody
   can sign as it. The portal creates buckets through the admin API with that
   account as owner, and deletes them over S3 as root, only when they're
-  empty. The owner always has read & write.
+  empty. The owner always has read & write, and manages it, with admins
+  and any group given *manages*.
 - **Group grants.** A bucket's owner, or an admin, can give any group a
   level on it. Members see the bucket under "Shared with you", use the file
   browser at their level, and can make keys up to it. Someone in several
@@ -111,6 +112,20 @@ they pick.
   compare without case. The settings page suggests the directory's groups
   (`LDAP_GROUP_FILTER`, default `(objectClass=posixGroup)`) and any the
   portal has seen in OIDC logins.
+- **Groups which manage a bucket.** A group may be given *manages*: read &
+  write, and managing the bucket as its owner does: who has access (other
+  managing groups too), the keys reaching it, storage and backups, and
+  deleting it. So a team's bucket isn't stuck when its owner leaves.
+  Managing is a group's alone: keys only read and write. The owner keeps
+  read & write whatever managers do.
+- **Transfers.** Admins give a bucket to another person (admin page,
+  Buckets, Transfer; or `POST /api/buckets/{bucket}/owner` with
+  `{"owner": "bob"}`), through the gateway's `change-bucket-owner`. Grants,
+  managing groups, keys and settings stay; the old owner keeps what their
+  groups give them, and their keys with it. Files keep their owners on
+  disk. Not while the bucket is being mirrored in. The People section marks
+  a suspended person who still owns buckets. See
+  `docs/design-bucket-managers.md`.
 - **Access keys:**
   - Each key is a gateway account with the `user` role and the person's uid
     and gid. With the posix backend's `--chuid --chgid`, everything a key
